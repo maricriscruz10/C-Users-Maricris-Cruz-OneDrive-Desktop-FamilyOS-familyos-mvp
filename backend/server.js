@@ -63,11 +63,42 @@ function audit(familyId, entityType, entityId, action, actorId, before, after) {
   db.prepare(`INSERT INTO audit_logs (id,family_id,entity_type,entity_id,action,actor_id,before_json,after_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
     .run(uuid(), familyId, entityType, entityId, action, actorId, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null, now());
 }
+// Expo Push API delivery — fires when EXPO_ACCESS_TOKEN is set.
+// Docs: https://docs.expo.dev/push-notifications/sending-notifications/
+const EXPO_ACCESS_TOKEN = process.env.EXPO_ACCESS_TOKEN || '';
+function sendExpoPush(pushToken, title, body) {
+  if (!EXPO_ACCESS_TOKEN || !pushToken || !pushToken.startsWith('ExponentPushToken[')) return;
+  const https = require('https');
+  const payload = JSON.stringify({ to: pushToken, title, body, sound: 'default' });
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Accept-Encoding': 'gzip, deflate',
+    'Authorization': `Bearer ${EXPO_ACCESS_TOKEN}`,
+    'Content-Length': Buffer.byteLength(payload),
+  };
+  const req = https.request({ hostname: 'exp.host', path: '/api/v2/push/send', method: 'POST', headers }, (res) => {
+    let data = ''; res.on('data', c => data += c);
+    res.on('end', () => {
+      try {
+        const result = JSON.parse(data);
+        if (result.data?.status === 'error') logger.warn('push', `Expo push error for ${pushToken}: ${result.data.message}`);
+      } catch {}
+    });
+  });
+  req.on('error', (e) => logger.warn('push', `Expo push request failed: ${e.message}`));
+  req.write(payload);
+  req.end();
+}
+
 function notify(familyId, userId, type, title, body, eventId = null) {
   const id = uuid();
   db.prepare(`INSERT INTO notifications (id,family_id,user_id,type,title,body,related_event_id,read,created_at) VALUES (?,?,?,?,?,?,?,0,?)`)
     .run(id, familyId, userId, type, title, body, eventId, now());
   broadcast(familyId, 'notification', { id, userId, type, title, body });
+  // Real push delivery if user has registered an Expo push token
+  const recipient = db.prepare(`SELECT push_token FROM users WHERE id = ?`).get(userId);
+  if (recipient?.push_token) sendExpoPush(recipient.push_token, title, body);
   return id;
 }
 function eventOut(row) {
@@ -230,6 +261,88 @@ route('POST', '/api/auth/dev-login', async (req, res) => {
   const token = createSession(user.id);
   logger.info('auth', `dev-login: ${user.email} (${user.role})`);
   sendJson(res, 200, { token, user: userOut({ ...user, status: 'active' }) });
+});
+
+// ---- Google OAuth (B7-prep) ----
+// Activate by setting GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI.
+// Flow: browser → GET /api/auth/google → Google consent → GET /api/auth/google/callback → token + user
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || '';
+const GOOGLE_ENABLED = !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REDIRECT_URI);
+
+route('GET', '/api/auth/google', async (req, res) => {
+  if (!GOOGLE_ENABLED) return err(res, 501, 'NOT_CONFIGURED', 'Google OAuth is not configured on this server');
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_REDIRECT_URI,
+    response_type: 'code',
+    scope: 'openid email profile',
+    access_type: 'offline',
+    prompt: 'select_account',
+  });
+  res.writeHead(302, { Location: `https://accounts.google.com/o/oauth2/v2/auth?${params}` });
+  res.end();
+});
+
+route('GET', '/api/auth/google/callback', async (req, res) => {
+  if (!GOOGLE_ENABLED) return err(res, 501, 'NOT_CONFIGURED', 'Google OAuth is not configured on this server');
+  const { code, error: oauthError } = url.parse(req.url, true).query;
+  if (oauthError || !code) return err(res, 400, 'OAUTH_ERROR', oauthError || 'Missing code');
+
+  // Exchange code for tokens using built-in https (no external deps)
+  const https = require('https');
+  async function httpsPost(hostname, path, body) {
+    return new Promise((resolve, reject) => {
+      const data = new URLSearchParams(body).toString();
+      const reqOpts = { hostname, path, method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) } };
+      const r = https.request(reqOpts, (resp) => { let buf = ''; resp.on('data', c => buf += c); resp.on('end', () => resolve(JSON.parse(buf))); });
+      r.on('error', reject); r.write(data); r.end();
+    });
+  }
+  async function httpsGet(hostname, path, token) {
+    return new Promise((resolve, reject) => {
+      const r = https.request({ hostname, path, headers: { Authorization: `Bearer ${token}` } }, (resp) => { let buf = ''; resp.on('data', c => buf += c); resp.on('end', () => resolve(JSON.parse(buf))); });
+      r.on('error', reject); r.end();
+    });
+  }
+
+  try {
+    const tokens = await httpsPost('oauth2.googleapis.com', '/token', {
+      code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
+      redirect_uri: GOOGLE_REDIRECT_URI, grant_type: 'authorization_code',
+    });
+    if (tokens.error) return err(res, 400, 'OAUTH_TOKEN_ERROR', tokens.error_description || tokens.error);
+
+    const profile = await httpsGet('www.googleapis.com', '/oauth2/v3/userinfo', tokens.access_token);
+    if (!profile.email) return err(res, 400, 'OAUTH_PROFILE_ERROR', 'Could not retrieve email from Google');
+
+    // Find or create user by email
+    let user = db.prepare(`SELECT * FROM users WHERE email = ?`).get(profile.email);
+    if (!user) {
+      // New Google user — create as invited (admin must assign to a family separately)
+      const id = uuid();
+      db.prepare(`INSERT INTO users (id,family_id,name,email,role,avatar_color,oauth_provider,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+        .run(id, '', profile.name || profile.email, profile.email, 'member', '#6366f1', 'google', 'invited', now());
+      user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(id);
+      logger.info('auth', `google-oauth: new user created ${profile.email}`);
+    } else if (user.status === 'invited') {
+      db.prepare(`UPDATE users SET status='active', oauth_provider='google' WHERE id=?`).run(user.id);
+      user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(user.id);
+    }
+    if (user.status === 'disabled') return err(res, 403, 'ACCOUNT_DISABLED', 'Account disabled');
+
+    const sessionToken = createSession(user.id);
+    logger.info('auth', `google-oauth: login ${profile.email} (${user.role})`);
+
+    // Redirect to web app with token in query string — web app stores it and navigates to dashboard
+    const webOrigin = CORS_ORIGINS ? [...CORS_ORIGINS][0] : 'http://localhost:3000';
+    res.writeHead(302, { Location: `${webOrigin}/#/dashboard?token=${sessionToken}` });
+    res.end();
+  } catch (e) {
+    logger.error('auth', `google-oauth callback error: ${e.message}`);
+    err(res, 500, 'OAUTH_CALLBACK_ERROR', 'OAuth callback failed — check server logs');
+  }
 });
 
 route('GET', '/api/auth/me', async (req, res) => {

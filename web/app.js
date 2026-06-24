@@ -52,6 +52,18 @@ const ROUTES = ['login', 'dashboard', 'calendar', 'budget', 'meals', 'chores', '
 function navigate(route) { location.hash = `#/${route}`; }
 window.addEventListener('hashchange', render);
 
+// Pick up ?token= from Google OAuth redirect and store it
+(function absorbOAuthToken() {
+  const params = new URLSearchParams(window.location.search);
+  const t = params.get('token');
+  if (t) {
+    state.token = t;
+    localStorage.setItem('familyos_token', t);
+    // Clean the token out of the URL without a page reload
+    history.replaceState(null, '', window.location.pathname + window.location.hash);
+  }
+})();
+
 async function render() {
   const app = document.getElementById('app');
   let route = (location.hash.replace('#/', '') || 'dashboard').split('?')[0];
