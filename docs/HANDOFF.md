@@ -32,12 +32,16 @@
 ## Configuration
 
 ### Backend
-| Config | Value | How to override |
+| Config | Default | How to override |
 |---|---|---|
-| Port | `4000` | `PORT=xxxx node server.js` |
-| Session secret | `familyos-dev-secret-change-in-prod` | `SESSION_SECRET=your-secret node server.js` |
-| Database directory | OS temp dir (`%TEMP%\familyos-data`) | `FAMILYOS_DATA_DIR=/path node server.js` |
-| Session TTL | 7 days | Hardcoded in `backend/auth.js` line 15 |
+| Port | `4000` | `PORT=xxxx` |
+| Session secret | `familyos-dev-secret-change-in-prod` | `SESSION_SECRET=your-strong-secret` (**required in prod**) |
+| Database directory | OS temp dir (`%TEMP%\familyos-data`) | `FAMILYOS_DATA_DIR=/path` |
+| Session TTL | 7 days | Hardcoded in `backend/auth.js` |
+| Environment | dev | `NODE_ENV=production` |
+| CORS allowed origins | `*` (dev) / blocks all (prod) | `CORS_ORIGINS=https://yourapp.com,https://www.yourapp.com` (**required in prod**) |
+| Rate limit max requests | `120` per window | `RATE_LIMIT_MAX=200` |
+| Rate limit window | `60000` ms (60s) | `RATE_LIMIT_WINDOW_MS=30000` |
 
 ### Web app
 | Config | File | Default |
@@ -177,6 +181,11 @@ Returns `{ token, user }`. Use the token as `Authorization: Bearer <token>` on a
 | Task 8 — Mobile/responsive layout | ✅ Done (2026-06-24) | Added `@media (max-width: 768px)` breakpoint. Sidebar becomes a fixed off-screen drawer (slides in with CSS transition). A sticky topbar with a hamburger button appears on mobile. A semi-transparent backdrop closes the drawer on tap. Grid collapses to 1 column, modals go full-width, padding reduces. Desktop layout unchanged. |
 | Task 9 — Dashboard points leaderboard | ✅ Done (2026-06-24) | Added `GET /api/families/:familyId/chores/leaderboard` backend route (queries `chore_completions` for the current week, aggregates points per user). Dashboard now shows a "This week's points" card with 🥇🥈🥉 medals, chore count, and points per member. Hidden when nobody has completed anything yet. |
 | Task 10 — Real-time sidebar badge | ✅ Done (2026-06-24) | Notification badge given a stable `id="notif-badge"`. SSE `notification` events now do a lightweight fetch-and-update of the badge only (no full re-render), with a pop animation when count increases. All other SSE events still trigger a full render. Task 3 optimistic-read update also switched to use `updateNotifBadge()`. Badge hides itself when count reaches 0. |
+| B1 — Disable dev endpoints in production | ✅ Done (2026-06-24) | `GET /api/dev/users` and `POST /api/auth/dev-login` return `404 NOT_FOUND` when `NODE_ENV=production`. A warning is logged at startup in dev mode. |
+| B2 — CORS restriction | ✅ Done (2026-06-24) | Added `CORS_ORIGINS` env var (comma-separated). In production, only listed origins receive `Access-Control-Allow-Origin`. In dev, `*` is still used. CORS origin is stamped onto `res._corsOrigin` at request entry so all helpers read it without signature changes. |
+| B3 — Security headers | ✅ Done (2026-06-24) | Every response now includes `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `X-XSS-Protection: 0`. `Strict-Transport-Security` is added in production only. |
+| B4 — Rate limiting | ✅ Done (2026-06-24) | In-memory per-IP rate limiter (no external deps). Defaults to 120 req/60s; override with `RATE_LIMIT_MAX` and `RATE_LIMIT_WINDOW_MS` env vars. Returns `429 RATE_LIMITED` with `Retry-After` header. Expired buckets cleaned every 30s. `X-RateLimit-Limit` and `X-RateLimit-Remaining` headers on every response. |
+| B5 — Environment validation | ✅ Done (2026-06-24) | Server exits immediately (`process.exit(1)`) if `NODE_ENV=production` and: (1) `SESSION_SECRET` is still the default dev value, or (2) `CORS_ORIGINS` is not set. Prevents accidentally running insecure defaults in production. |
 
 ---
 

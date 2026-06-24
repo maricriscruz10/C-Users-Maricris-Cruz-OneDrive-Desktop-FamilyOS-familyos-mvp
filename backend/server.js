@@ -27,14 +27,13 @@ function broadcast(familyId, eventName, payload) {
 }
 
 // ---------- helpers ----------
+// res._corsOrigin is stamped by the main request handler before any route runs,
+// so sendJson/err never need req threaded through them.
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-  });
+  const headers = { 'Content-Type': 'application/json', 'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' };
+  if (res._corsOrigin) headers['Access-Control-Allow-Origin'] = res._corsOrigin;
+  res.writeHead(status, headers);
   res.end(body);
 }
 function err(res, status, code, message) {
@@ -167,12 +166,59 @@ route('GET', '/api/health', async (req, res) => {
 });
 
 // ---- Auth ----
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+// ---------- Rate limiting (in-memory, per IP) ----------
+// RATE_LIMIT_MAX requests per RATE_LIMIT_WINDOW_MS window per IP. No external deps.
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || '120', 10);   // default 120 req
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10); // per 60s
+const rateBuckets = new Map(); // ip -> { count, resetAt }
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of rateBuckets) {
+    if (now >= bucket.resetAt) rateBuckets.delete(ip);
+  }
+}, 30000); // clean up expired buckets every 30s
+
+function checkRateLimit(req, res) {
+  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
+    rateBuckets.set(ip, bucket);
+  }
+  bucket.count++;
+  res.setHeader('X-RateLimit-Limit', RATE_LIMIT_MAX);
+  res.setHeader('X-RateLimit-Remaining', Math.max(0, RATE_LIMIT_MAX - bucket.count));
+  if (bucket.count > RATE_LIMIT_MAX) {
+    res.setHeader('Retry-After', Math.ceil((bucket.resetAt - now) / 1000));
+    err(res, 429, 'RATE_LIMITED', 'Too many requests — please slow down');
+    return false;
+  }
+  return true;
+}
+
+// CORS_ORIGINS: comma-separated list of allowed origins.
+// Defaults to * in dev; MUST be set explicitly in production.
+const CORS_ORIGINS = process.env.CORS_ORIGINS
+  ? new Set(process.env.CORS_ORIGINS.split(',').map(o => o.trim()))
+  : null; // null = allow all (dev only)
+
+function corsOrigin(req) {
+  if (!IS_PROD || !CORS_ORIGINS) return '*';
+  const origin = req.headers['origin'] || '';
+  return CORS_ORIGINS.has(origin) ? origin : '';
+}
+
 route('GET', '/api/dev/users', async (req, res) => {
+  if (IS_PROD) return err(res, 404, 'NOT_FOUND', 'Not found');
   const rows = db.prepare(`SELECT u.*, f.name as family_name FROM users u JOIN families f ON f.id = u.family_id ORDER BY f.name, u.role DESC`).all();
   sendJson(res, 200, { users: rows.map(r => ({ ...userOut(r), familyName: r.family_name })) });
 });
 
 route('POST', '/api/auth/dev-login', async (req, res) => {
+  if (IS_PROD) return err(res, 404, 'NOT_FOUND', 'Not found');
   const body = await readBody(req);
   if (!body.userId && !body.email) return err(res, 400, 'VALIDATION_ERROR', 'userId or email is required');
   const user = body.userId
@@ -197,7 +243,7 @@ route('POST', '/api/auth/push-token', async (req, res) => {
   if (!body.token) return err(res, 400, 'VALIDATION', 'token is required');
   db.prepare(`UPDATE users SET push_token = ? WHERE id = ?`).run(body.token, user.id);
   logger.info('push', `Registered push token for ${user.email}`);
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 // ---- Families / members ----
@@ -221,7 +267,7 @@ route('PUT', '/api/families/:familyId/settings', async (req, res, p) => {
     .run(JSON.stringify(after), body.name || null, body.timezone || null, p.familyId);
   audit(p.familyId, 'family', p.familyId, 'settings_update', user.id, before, after);
   broadcast(p.familyId, 'family_updated', { familyId: p.familyId });
-  sendJson(res, 200, { settings: after });
+  sendJson(res, 200, { settings: after }, req);
 });
 
 route('GET', '/api/families/:familyId/members', async (req, res, p) => {
@@ -265,7 +311,7 @@ route('PATCH', '/api/families/:familyId/members/:userId', async (req, res, p) =>
   audit(p.familyId, 'user', p.userId, 'role_change', user.id, before, after);
   if (body.role) notify(p.familyId, p.userId, 'role_changed', 'Your role changed', `Your role is now ${body.role}`);
   broadcast(p.familyId, 'member_updated', { userId: p.userId });
-  sendJson(res, 200, { member: after });
+  sendJson(res, 200, { member: after }, req);
 });
 
 route('DELETE', '/api/families/:familyId/members/:userId', async (req, res, p) => {
@@ -282,7 +328,7 @@ route('DELETE', '/api/families/:familyId/members/:userId', async (req, res, p) =
   db.prepare(`UPDATE users SET status = 'disabled' WHERE id = ?`).run(p.userId);
   audit(p.familyId, 'user', p.userId, 'remove', user.id, userOut(target), null);
   broadcast(p.familyId, 'member_updated', { userId: p.userId });
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 // ---- Events (category='general'|'appointment' — appointments reuse this whole subsystem) ----
@@ -296,7 +342,7 @@ route('GET', '/api/families/:familyId/events', async (req, res, p, query) => {
   let occurrences = [];
   for (const row of rows) occurrences = occurrences.concat(expandOccurrences(row, start, end));
   occurrences.sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
-  sendJson(res, 200, { events: occurrences });
+  sendJson(res, 200, { events: occurrences }, req);
 });
 
 route('GET', '/api/families/:familyId/sync', async (req, res, p, query) => {
@@ -408,7 +454,7 @@ route('DELETE', '/api/events/:eventId', async (req, res, p) => {
   db.prepare(`UPDATE events SET deleted = 1, version = version + 1, updated_at = ? WHERE id = ?`).run(now(), p.eventId);
   audit(row.family_id, 'event', p.eventId, 'delete', user.id, eventOut(row), null);
   broadcast(row.family_id, 'event_deleted', { id: p.eventId });
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 route('POST', '/api/events/:eventId/assign', async (req, res, p) => {
@@ -427,7 +473,7 @@ route('POST', '/api/events/:eventId/assign', async (req, res, p) => {
   notify(row.family_id, body.userId, 'event_assigned', 'New event assigned', `You were assigned to "${row.title}"`, p.eventId);
   audit(row.family_id, 'event_assignment', p.eventId, 'assign', user.id, null, { userId: body.userId });
   broadcast(row.family_id, 'event_updated', eventOut(db.prepare(`SELECT * FROM events WHERE id=?`).get(p.eventId)));
-  sendJson(res, 201, { ok: true });
+  sendJson(res, 201, { ok: true }, req);
 });
 
 route('POST', '/api/events/:eventId/respond', async (req, res, p) => {
@@ -443,7 +489,7 @@ route('POST', '/api/events/:eventId/respond', async (req, res, p) => {
   audit(row.family_id, 'event_assignment', assignment.id, 'respond', user.id, { status: assignment.response_status }, { status: body.status });
   notify(row.family_id, row.created_by, 'event_updated', 'Response received', `${user.name} marked "${row.title}" as ${body.status}`, p.eventId);
   broadcast(row.family_id, 'event_updated', eventOut(db.prepare(`SELECT * FROM events WHERE id=?`).get(p.eventId)));
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 // ---- Budgeting ----
@@ -484,7 +530,7 @@ route('PUT', '/api/budget/categories/:id', async (req, res, p) => {
   const after = budgetCategoryOut(db.prepare(`SELECT * FROM budget_categories WHERE id=?`).get(p.id));
   audit(row.family_id, 'budget_category', p.id, 'update', user.id, before, after);
   broadcast(row.family_id, 'budget_updated', { categoryId: p.id });
-  sendJson(res, 200, { category: after });
+  sendJson(res, 200, { category: after }, req);
 });
 
 route('DELETE', '/api/budget/categories/:id', async (req, res, p) => {
@@ -498,7 +544,7 @@ route('DELETE', '/api/budget/categories/:id', async (req, res, p) => {
   db.prepare(`DELETE FROM budget_categories WHERE id = ?`).run(p.id);
   audit(row.family_id, 'budget_category', p.id, 'delete', user.id, budgetCategoryOut(row), null);
   broadcast(row.family_id, 'budget_updated', { categoryId: p.id });
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 route('GET', '/api/families/:familyId/budget/transactions', async (req, res, p, query) => {
@@ -537,7 +583,7 @@ route('DELETE', '/api/budget/transactions/:id', async (req, res, p) => {
   db.prepare(`DELETE FROM budget_transactions WHERE id = ?`).run(p.id);
   audit(row.family_id, 'budget_transaction', p.id, 'delete', user.id, budgetTransactionOut(row), null);
   broadcast(row.family_id, 'budget_updated', { transactionId: p.id });
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 route('GET', '/api/families/:familyId/budget/summary', async (req, res, p, query) => {
@@ -600,7 +646,7 @@ route('PUT', '/api/meals/:id', async (req, res, p) => {
   const after = mealOut(db.prepare(`SELECT * FROM meal_plan_entries WHERE id=?`).get(p.id));
   audit(row.family_id, 'meal', p.id, 'update', user.id, before, after);
   broadcast(row.family_id, 'meal_updated', { mealId: p.id });
-  sendJson(res, 200, { meal: after });
+  sendJson(res, 200, { meal: after }, req);
 });
 
 route('DELETE', '/api/meals/:id', async (req, res, p) => {
@@ -612,7 +658,7 @@ route('DELETE', '/api/meals/:id', async (req, res, p) => {
   db.prepare(`DELETE FROM meal_plan_entries WHERE id = ?`).run(p.id);
   audit(row.family_id, 'meal', p.id, 'delete', user.id, mealOut(row), null);
   broadcast(row.family_id, 'meal_updated', { mealId: p.id });
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 // ---- Chores ----
@@ -662,7 +708,7 @@ route('PUT', '/api/chores/:id', async (req, res, p) => {
     notify(row.family_id, body.assigneeId, 'chore_assigned', 'Chore reassigned to you', `You were assigned: "${after.title}"`);
   }
   broadcast(row.family_id, 'chore_updated', { choreId: p.id });
-  sendJson(res, 200, { chore: after });
+  sendJson(res, 200, { chore: after }, req);
 });
 
 route('DELETE', '/api/chores/:id', async (req, res, p) => {
@@ -674,7 +720,7 @@ route('DELETE', '/api/chores/:id', async (req, res, p) => {
   db.prepare(`UPDATE chores SET deleted = 1, updated_at = ? WHERE id = ?`).run(now(), p.id);
   audit(row.family_id, 'chore', p.id, 'delete', user.id, choreOut(row), null);
   broadcast(row.family_id, 'chore_updated', { choreId: p.id });
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 route('POST', '/api/chores/:id/complete', async (req, res, p) => {
@@ -751,13 +797,13 @@ route('GET', '/api/notifications', async (req, res) => {
 route('POST', '/api/notifications/:id/read', async (req, res, p) => {
   const user = requireAuth(req, res); if (!user) return;
   db.prepare(`UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?`).run(p.id, user.id);
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 route('POST', '/api/notifications/read-all', async (req, res) => {
   const user = requireAuth(req, res); if (!user) return;
   db.prepare(`UPDATE notifications SET read = 1 WHERE user_id = ?`).run(user.id);
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true }, req);
 });
 
 // ---- Real-time stream (SSE) ----
@@ -785,14 +831,24 @@ const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const pathname = decodeURIComponent(parsed.pathname);
 
+  // Stamp CORS origin once so sendJson/err can use it without needing req.
+  res._corsOrigin = corsOrigin(req);
+
+  // Security headers on every response.
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-XSS-Protection', '0'); // modern browsers ignore it; disabling is safer than enabling
+  if (IS_PROD) res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    });
+    const headers = { 'Access-Control-Allow-Headers': 'Content-Type, Authorization', 'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS' };
+    if (res._corsOrigin) headers['Access-Control-Allow-Origin'] = res._corsOrigin;
+    res.writeHead(204, headers);
     return res.end();
   }
+
+  if (!checkRateLimit(req, res)) return;
 
   for (const r of routes) {
     if (r.method !== req.method) continue;
@@ -813,4 +869,5 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   logger.info('server', `FamilyOS backend listening on http://localhost:${PORT}`);
+  if (!IS_PROD) logger.warn('server', 'Running in DEV mode — /api/dev/users and /api/auth/dev-login are enabled. Set NODE_ENV=production to disable.');
 });

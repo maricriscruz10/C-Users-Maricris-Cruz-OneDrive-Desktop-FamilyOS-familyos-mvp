@@ -11,7 +11,19 @@
 const crypto = require('crypto');
 const db = require('./db');
 
-const SECRET = process.env.SESSION_SECRET || 'familyos-dev-secret-change-in-prod';
+const DEV_SECRET = 'familyos-dev-secret-change-in-prod';
+const SECRET = process.env.SESSION_SECRET || DEV_SECRET;
+
+if (process.env.NODE_ENV === 'production' && SECRET === DEV_SECRET) {
+  console.error('FATAL: SESSION_SECRET is still the default dev value. Set a strong SESSION_SECRET before running in production.');
+  process.exit(1);
+}
+
+if (process.env.NODE_ENV === 'production' && !process.env.CORS_ORIGINS) {
+  console.error('FATAL: CORS_ORIGINS is not set. Specify allowed origins (e.g. CORS_ORIGINS=https://yourapp.com) before running in production.');
+  process.exit(1);
+}
+
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 
 function sign(payloadObj) {
