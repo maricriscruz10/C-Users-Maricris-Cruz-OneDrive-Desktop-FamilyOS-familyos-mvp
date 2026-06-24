@@ -99,9 +99,18 @@ function connectStream() {
   // so we instead poll lightly as a robust fallback — see pollFallback below).
   es.onerror = () => { state.connected = false; updateConnDot(); };
   es.onopen = () => { state.connected = true; updateConnDot(); };
-  ['event_created', 'event_updated', 'event_deleted', 'notification', 'member_updated', 'family_updated',
+  ['event_created', 'event_updated', 'event_deleted', 'member_updated', 'family_updated',
    'budget_updated', 'meal_updated', 'chore_updated'].forEach((evt) => {
     es.addEventListener(evt, () => { refreshData().then(render); });
+  });
+  es.addEventListener('notification', async () => {
+    const prev = unreadCount();
+    const { notifications } = await api('/api/notifications').catch(() => ({ notifications: state.notifications }));
+    state.notifications = notifications;
+    updateNotifBadge(prev);
+    // also refresh the notifications screen in-place if it's currently open
+    const screen = document.getElementById('screen-root');
+    if (screen && location.hash === '#/notifications') render();
   });
   state.sse = es;
   // Robust fallback since EventSource cannot carry Authorization headers in browsers:
@@ -131,6 +140,9 @@ function Shell(route) {
   wrap.style.display = 'flex'; wrap.style.width = '100%';
   const isChild = state.user.role === 'child';
 
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sidebar-backdrop';
+
   const sidebar = document.createElement('div');
   sidebar.className = 'sidebar';
   sidebar.innerHTML = `
@@ -155,30 +167,65 @@ function Shell(route) {
     </div>
     <div class="nav-link" id="logout-btn">↪ Switch user</div>
   `;
+
+  function closeSidebar() { sidebar.classList.remove('open'); backdrop.classList.remove('open'); }
   sidebar.querySelectorAll('.nav-link[data-route]').forEach((el) => {
-    el.addEventListener('click', () => navigate(el.dataset.route));
+    el.addEventListener('click', () => { navigate(el.dataset.route); closeSidebar(); });
   });
   sidebar.querySelector('#logout-btn').addEventListener('click', logout);
+  backdrop.addEventListener('click', closeSidebar);
+
+  const topbar = document.createElement('div');
+  topbar.className = 'topbar';
+  topbar.innerHTML = `
+    <button class="hamburger" aria-label="Open menu">
+      <span></span><span></span><span></span>
+    </button>
+    <div class="brand" style="padding:0; font-size:16px;"><span class="dot"></span> FamilyOS</div>
+  `;
+  topbar.querySelector('.hamburger').addEventListener('click', () => {
+    sidebar.classList.toggle('open');
+    backdrop.classList.toggle('open');
+  });
 
   const main = document.createElement('div');
   main.className = 'main';
   main.appendChild(screenFor(route));
 
+  wrap.appendChild(backdrop);
   wrap.appendChild(sidebar);
-  wrap.appendChild(main);
+  wrap.appendChild(document.createElement('div')); // flex column wrapper for topbar+main
+  wrap.lastChild.style.cssText = 'flex:1; display:flex; flex-direction:column; min-width:0;';
+  wrap.lastChild.appendChild(topbar);
+  wrap.lastChild.appendChild(main);
   return wrap;
 }
 function navLink(route, icon, label, current, badge) {
+  const badgeId = route === 'notifications' ? ' id="notif-badge"' : '';
   return `<div class="nav-link${route === current ? ' active' : ''}" data-route="${route}">
-    <span>${icon}</span><span>${label}</span>${badge ? `<span class="badge pending" style="margin-left:auto;">${badge}</span>` : ''}
+    <span>${icon}</span><span>${label}</span>${badge ? `<span${badgeId} class="badge pending" style="margin-left:auto;">${badge}</span>` : `<span${badgeId} class="badge pending" style="margin-left:auto; display:none;"></span>`}
   </div>`;
 }
-function unreadCount() { const n = state.notifications.filter((x) => !x.read).length; return n || ''; }
+function unreadCount() { return state.notifications.filter((x) => !x.read).length; }
+function updateNotifBadge(prevCount) {
+  const badge = document.getElementById('notif-badge');
+  if (!badge) return;
+  const count = unreadCount();
+  if (count > 0) {
+    badge.textContent = count;
+    badge.style.display = '';
+    if (count > prevCount) badge.classList.add('badge-pulse');
+    setTimeout(() => badge.classList.remove('badge-pulse'), 600);
+  } else {
+    badge.style.display = 'none';
+  }
+}
 function initials(name) { return name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase(); }
 
 function screenFor(route) {
   const el = document.createElement('div');
   el.id = 'screen-root';
+  el.innerHTML = `<div class="screen-loading"><div class="spinner"></div></div>`;
   (async () => {
     try {
       if (route === 'dashboard') el.innerHTML = await DashboardScreen();
@@ -252,10 +299,14 @@ async function DashboardScreen() {
   const activeMembers = state.members.filter((m) => m.status === 'active').length;
 
   let choresWidget = '';
+  let leaderboardWidget = '';
   try {
-    const { chores } = await api(`/api/families/${fam}/chores`);
-    state.chores = chores;
-    const myChores = chores.filter((c) => c.assigneeId === state.user.id && c.status === 'pending');
+    const [choresRes, lbRes] = await Promise.all([
+      api(`/api/families/${fam}/chores`),
+      api(`/api/families/${fam}/chores/leaderboard`),
+    ]);
+    state.chores = choresRes.chores;
+    const myChores = choresRes.chores.filter((c) => c.assigneeId === state.user.id && c.status === 'pending');
     choresWidget = `
       <div class="card">
         <h3>Your chores</h3>
@@ -268,6 +319,24 @@ async function DashboardScreen() {
             <span class="badge pending">pending</span>
           </div>`).join('') : '<div class="empty-state">No chores assigned to you right now.</div>'}
       </div>`;
+    if (lbRes.leaderboard.length) {
+      const medals = ['🥇', '🥈', '🥉'];
+      leaderboardWidget = `
+        <div class="card">
+          <h3>This week's points</h3>
+          <p class="subtitle" style="margin-bottom:12px;">Week starting ${lbRes.weekStart}</p>
+          ${lbRes.leaderboard.map((entry, i) => `
+            <div class="event-row">
+              <div style="font-size:20px; width:28px; text-align:center;">${medals[i] || '🏅'}</div>
+              <div class="avatar sm" style="background:${entry.avatarColor}">${initials(entry.name)}</div>
+              <div style="flex:1;">
+                <div class="event-title">${escapeHtml(entry.name)}${entry.userId === state.user.id ? ' <span class="badge accepted">you</span>' : ''}</div>
+                <div class="event-meta">${entry.count} chore${entry.count === 1 ? '' : 's'} completed</div>
+              </div>
+              <div style="font-weight:800; font-size:18px; color:var(--primary);">${entry.points} pts</div>
+            </div>`).join('')}
+        </div>`;
+    }
   } catch { /* role may lack chores:view, though all roles currently have it */ }
 
   return `
@@ -297,6 +366,7 @@ async function DashboardScreen() {
     </div>` : ''}
 
     ${choresWidget}
+    ${leaderboardWidget}
   `;
 }
 function dayPart() { const h = new Date().getHours(); return h < 12 ? 'morning' : h < 18 ? 'afternoon' : 'evening'; }
@@ -314,9 +384,18 @@ function eventRowHtml(e) {
   </div>`;
 }
 function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+function markInvalid(inputEl) {
+  const field = inputEl.closest('.field') || inputEl.parentElement;
+  field.classList.add('field-error');
+  inputEl.focus();
+  const clear = () => { field.classList.remove('field-error'); inputEl.removeEventListener('input', clear); inputEl.removeEventListener('change', clear); };
+  inputEl.addEventListener('input', clear);
+  inputEl.addEventListener('change', clear);
+}
 
 // ---------- CALENDAR ----------
 let calCursor = new Date();
+let budgetCursor = new Date();
 async function CalendarScreen() {
   const fam = state.user.familyId;
   const monthStart = new Date(calCursor.getFullYear(), calCursor.getMonth(), 1);
@@ -362,23 +441,29 @@ async function CalendarScreen() {
 // ---------- BUDGET (Admin/Member only — Child has zero access) ----------
 async function BudgetScreen() {
   const fam = state.user.familyId;
+  const month = `${budgetCursor.getFullYear()}-${String(budgetCursor.getMonth() + 1).padStart(2, '0')}`;
   const [catRes, txRes, sumRes] = await Promise.all([
     api(`/api/families/${fam}/budget/categories`),
-    api(`/api/families/${fam}/budget/transactions`),
-    api(`/api/families/${fam}/budget/summary`),
+    api(`/api/families/${fam}/budget/transactions?month=${month}`),
+    api(`/api/families/${fam}/budget/summary?month=${month}`),
   ]);
   state.budgetCategories = catRes.categories;
   state.budgetTransactions = txRes.transactions;
   state.budgetSummary = sumRes;
   const canManageCats = state.user.role === 'admin';
+  const canManageTx = state.user.role !== 'child'; // admin + member both have budget:manage
+  const monthLabel = budgetCursor.toLocaleString([], { month: 'long', year: 'numeric' });
 
   const catName = (id) => (state.budgetCategories.find((c) => c.id === id) || {}).name || '—';
 
   return `
     <div class="row between"><h1>Budget</h1>
       <div class="flex-gap">
+        <button class="btn secondary sm" id="budget-prev">←</button>
+        <span style="font-weight:700; padding:6px 4px;">${monthLabel}</span>
+        <button class="btn secondary sm" id="budget-next">→</button>
         ${canManageCats ? '<button class="btn secondary sm" id="add-budget-cat-btn">+ Category</button>' : ''}
-        <button class="btn sm" id="add-budget-tx-btn">+ Transaction</button>
+        ${canManageTx ? '<button class="btn sm" id="add-budget-tx-btn">+ Transaction</button>' : ''}
       </div>
     </div>
     <p class="subtitle">${sumRes.month} · $${sumRes.totalSpent.toFixed(2)} spent of $${sumRes.totalLimit.toFixed(2)} limit</p>
@@ -395,7 +480,7 @@ async function BudgetScreen() {
     <div class="card">
       <h3>Transactions this household has logged</h3>
       <table>
-        <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Amount</th>${canManageCats ? '<th></th>' : ''}</tr></thead>
+        <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Amount</th>${canManageTx ? '<th></th>' : ''}</tr></thead>
         <tbody>
           ${state.budgetTransactions.map((t) => `
             <tr>
@@ -403,7 +488,7 @@ async function BudgetScreen() {
               <td>${escapeHtml(catName(t.categoryId))}</td>
               <td>${escapeHtml(t.description)}</td>
               <td style="font-weight:600;">$${t.amount.toFixed(2)}</td>
-              <td><button class="btn danger sm remove-budget-tx" data-tid="${t.id}">Delete</button></td>
+              ${canManageTx ? `<td><button class="btn danger sm remove-budget-tx" data-tid="${t.id}">Delete</button></td>` : ''}
             </tr>`).join('')}
         </tbody>
       </table>
@@ -648,7 +733,10 @@ function openEventModal(existing) {
       provider: backdrop.querySelector('#ev-provider').value,
       assigneeIds: [...backdrop.querySelectorAll('.assignee-cb:checked')].map((cb) => cb.value),
     };
-    if (!payload.title) return toast('Title is required', true);
+    if (!payload.title) { markInvalid(backdrop.querySelector('#ev-title')); return toast('Title is required', true); }
+    if (!backdrop.querySelector('#ev-start').value) { markInvalid(backdrop.querySelector('#ev-start')); return toast('Start time is required', true); }
+    if (!backdrop.querySelector('#ev-end').value) { markInvalid(backdrop.querySelector('#ev-end')); return toast('End time is required', true); }
+    if (new Date(payload.endAt) <= new Date(payload.startAt)) { markInvalid(backdrop.querySelector('#ev-end')); return toast('End must be after start', true); }
     try {
       if (isEdit) {
         payload.version = existing.version;
@@ -670,6 +758,47 @@ function toLocalInput(iso) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// ---------- DAY SUMMARY MODAL ----------
+function openDayModal(date, dayEvents) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  const label = date.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+  backdrop.innerHTML = `
+    <div class="modal" style="width:400px;">
+      <div class="row between" style="margin-bottom:14px;">
+        <h3 style="margin:0;">${label}</h3>
+        <button class="btn secondary sm" id="day-close">✕</button>
+      </div>
+      <div id="day-event-list">
+        ${dayEvents.map((e) => {
+          const t = new Date(e.startAt);
+          const tag = e.category === 'appointment' ? '<span class="badge admin" style="margin-right:6px;">📌</span>' : '';
+          return `<div class="event-row day-event-item" data-eid="${e.masterId || e.id}" style="cursor:pointer; border:1px solid var(--border); border-radius:10px; margin-bottom:8px;">
+            <div class="event-time">${e.allDay ? 'All day' : t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</div>
+            <div style="flex:1;">
+              <div class="event-title">${tag}${escapeHtml(e.title)}</div>
+              ${e.location ? `<div class="event-meta">📍 ${escapeHtml(e.location)}</div>` : ''}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+      <button class="btn sm" id="day-new-event" style="width:100%; margin-top:6px;">+ New event this day</button>
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('#day-close').onclick = () => backdrop.remove();
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+  backdrop.querySelectorAll('.day-event-item').forEach((item) => {
+    item.onmouseenter = () => { item.style.borderColor = 'var(--primary)'; };
+    item.onmouseleave = () => { item.style.borderColor = 'var(--border)'; };
+    item.onclick = () => {
+      backdrop.remove();
+      const ev = state.events.find((e) => (e.masterId || e.id) === item.dataset.eid);
+      if (ev) openEventModal(ev);
+    };
+  });
+  backdrop.querySelector('#day-new-event').onclick = () => { backdrop.remove(); openEventModal(null); };
+}
+
 // ---------- BUDGET MODALS ----------
 function openBudgetCategoryModal() {
   const backdrop = document.createElement('div');
@@ -689,7 +818,7 @@ function openBudgetCategoryModal() {
   backdrop.querySelector('#bc-cancel').onclick = () => backdrop.remove();
   backdrop.querySelector('#bc-save').onclick = async () => {
     const name = document.querySelector('#bc-name').value;
-    if (!name) return toast('Name is required', true);
+    if (!name) { markInvalid(document.querySelector('#bc-name')); return toast('Name is required', true); }
     const monthlyLimit = Number(document.querySelector('#bc-limit').value) || 0;
     const color = document.querySelector('#bc-color').value;
     try {
@@ -723,7 +852,8 @@ function openBudgetTransactionModal() {
     const amount = Number(document.querySelector('#bt-amount').value);
     const description = document.querySelector('#bt-desc').value;
     const occurredOn = document.querySelector('#bt-date').value;
-    if (!amount || !occurredOn) return toast('Amount and date are required', true);
+    if (!amount) { markInvalid(document.querySelector('#bt-amount')); return toast('Amount is required', true); }
+    if (!occurredOn) { markInvalid(document.querySelector('#bt-date')); return toast('Date is required', true); }
     try {
       await api(`/api/families/${state.user.familyId}/budget/transactions`, { method: 'POST', body: JSON.stringify({ categoryId, amount, description, occurredOn }) });
       toast('Transaction logged'); backdrop.remove(); render();
@@ -760,7 +890,7 @@ function openMealModal() {
     const title = document.querySelector('#ml-title').value;
     const notes = document.querySelector('#ml-notes').value;
     const assignedCook = document.querySelector('#ml-cook').value || null;
-    if (!title) return toast('Title is required', true);
+    if (!title) { markInvalid(document.querySelector('#ml-title')); return toast('Title is required', true); }
     try {
       await api(`/api/families/${state.user.familyId}/meals`, { method: 'POST', body: JSON.stringify({ mealDate, mealType, title, notes, assignedCook }) });
       toast('Meal added'); backdrop.remove(); render();
@@ -794,7 +924,7 @@ function openChoreModal() {
   backdrop.querySelector('#ch-cancel').onclick = () => backdrop.remove();
   backdrop.querySelector('#ch-save').onclick = async () => {
     const title = document.querySelector('#ch-title').value;
-    if (!title) return toast('Title is required', true);
+    if (!title) { markInvalid(document.querySelector('#ch-title')); return toast('Title is required', true); }
     const description = document.querySelector('#ch-desc').value;
     const assigneeId = document.querySelector('#ch-assignee').value || null;
     const recurrence = document.querySelector('#ch-recurrence').value;
@@ -820,16 +950,30 @@ function wireScreenEvents(route) {
     document.querySelectorAll('.cal-day[data-date]').forEach((cell) => {
       cell.onclick = () => {
         const dayEvents = state.events.filter((e) => sameDay(new Date(e.startAt), new Date(cell.dataset.date)));
-        if (dayEvents.length === 1) openEventModal(dayEvents[0]);
-        else openEventModal(null);
+        if (dayEvents.length === 0) { openEventModal(null); return; }
+        if (dayEvents.length === 1) { openEventModal(dayEvents[0]); return; }
+        openDayModal(new Date(cell.dataset.date), dayEvents);
       };
     });
     document.querySelectorAll('#cal-prev').forEach((b) => b.onclick = () => { calCursor.setMonth(calCursor.getMonth() - 1); render(); });
     document.querySelectorAll('#cal-next').forEach((b) => b.onclick = () => { calCursor.setMonth(calCursor.getMonth() + 1); render(); });
     document.querySelectorAll('.role-select').forEach((sel) => {
+      let prevRole = sel.value;
       sel.onchange = async () => {
-        await api(`/api/families/${state.user.familyId}/members/${sel.dataset.uid}`, { method: 'PATCH', body: JSON.stringify({ role: sel.value }) });
-        toast('Role updated'); render();
+        const newRole = sel.value;
+        const memberName = sel.closest('tr')?.querySelector('td')?.textContent?.trim() || 'this member';
+        if (!confirm(`Change ${memberName}'s role to "${newRole}"?`)) {
+          sel.value = prevRole;
+          return;
+        }
+        try {
+          await api(`/api/families/${state.user.familyId}/members/${sel.dataset.uid}`, { method: 'PATCH', body: JSON.stringify({ role: newRole }) });
+          prevRole = newRole;
+          toast('Role updated');
+          render();
+        } catch {
+          sel.value = prevRole;
+        }
       };
     });
     document.querySelectorAll('.remove-member').forEach((b) => {
@@ -852,7 +996,28 @@ function wireScreenEvents(route) {
     const markAllBtn = document.querySelector('#mark-all-read-btn');
     if (markAllBtn) markAllBtn.onclick = async () => { await api('/api/notifications/read-all', { method: 'POST' }); render(); };
 
+    document.querySelectorAll('.event-row[data-nid]').forEach((row) => {
+      row.style.cursor = 'pointer';
+      row.onclick = async () => {
+        const nid = row.dataset.nid;
+        const notif = state.notifications.find((n) => n.id === nid);
+        if (!notif || notif.read) return;
+        // optimistic update — mark read immediately in UI
+        const prev = unreadCount();
+        notif.read = true;
+        row.style.background = '';
+        const dot = row.querySelector('div[style*="border-radius:50%"]');
+        if (dot) dot.style.background = 'transparent';
+        updateNotifBadge(prev);
+        api(`/api/notifications/${nid}/read`, { method: 'POST' }).catch(() => { notif.read = false; updateNotifBadge(0); });
+      };
+    });
+
     // budget
+    const budgetPrev = document.querySelector('#budget-prev');
+    if (budgetPrev) budgetPrev.onclick = () => { budgetCursor.setMonth(budgetCursor.getMonth() - 1); render(); };
+    const budgetNext = document.querySelector('#budget-next');
+    if (budgetNext) budgetNext.onclick = () => { budgetCursor.setMonth(budgetCursor.getMonth() + 1); render(); };
     const addCatBtn = document.querySelector('#add-budget-cat-btn');
     if (addCatBtn) addCatBtn.onclick = () => openBudgetCategoryModal();
     const addTxBtn = document.querySelector('#add-budget-tx-btn');
@@ -917,7 +1082,8 @@ function openInviteModal() {
     const name = document.querySelector('#inv-name').value;
     const email = document.querySelector('#inv-email').value;
     const role = document.querySelector('#inv-role').value;
-    if (!name || !email) return toast('Name and email are required', true);
+    if (!name) { markInvalid(document.querySelector('#inv-name')); return toast('Name is required', true); }
+    if (!email) { markInvalid(document.querySelector('#inv-email')); return toast('Email is required', true); }
     try {
       await api(`/api/families/${state.user.familyId}/members/invite`, { method: 'POST', body: JSON.stringify({ name, email, role }) });
       toast('Invite created — they can dev-login from the login screen now');

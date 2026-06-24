@@ -700,6 +700,31 @@ route('POST', '/api/chores/:id/complete', async (req, res, p) => {
   sendJson(res, 200, { ok: true, pointsAwarded: row.points });
 });
 
+route('GET', '/api/families/:familyId/chores/leaderboard', async (req, res, p) => {
+  const user = requireAuth(req, res); if (!user) return;
+  if (!requireFamily(req, res, user, p.familyId)) return;
+  if (!requirePermission(req, res, user, 'chores:view')) return;
+  const weekStart = new Date();
+  weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // Sunday
+  weekStart.setHours(0, 0, 0, 0);
+  const since = weekStart.toISOString().slice(0, 10);
+  const completions = db.prepare(`
+    SELECT cc.completed_by, cc.points_awarded, u.name, u.avatar_color
+    FROM chore_completions cc
+    JOIN users u ON u.id = cc.completed_by
+    JOIN chores c ON c.id = cc.chore_id
+    WHERE c.family_id = ? AND cc.completed_on >= ?
+  `).all(p.familyId, since);
+  const byUser = {};
+  for (const row of completions) {
+    if (!byUser[row.completed_by]) byUser[row.completed_by] = { userId: row.completed_by, name: row.name, avatarColor: row.avatar_color, points: 0, count: 0 };
+    byUser[row.completed_by].points += row.points_awarded;
+    byUser[row.completed_by].count += 1;
+  }
+  const leaderboard = Object.values(byUser).sort((a, b) => b.points - a.points);
+  sendJson(res, 200, { leaderboard, weekStart: since });
+});
+
 // ---- Audit log ----
 route('GET', '/api/families/:familyId/audit-logs', async (req, res, p) => {
   const user = requireAuth(req, res); if (!user) return;
