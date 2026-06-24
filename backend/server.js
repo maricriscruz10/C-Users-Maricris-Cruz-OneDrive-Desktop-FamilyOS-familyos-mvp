@@ -14,6 +14,13 @@ const { createSession, getUserFromToken, hasPermission } = require('./auth');
 const PORT = process.env.PORT || 4000;
 const uuid = () => crypto.randomUUID();
 const now = () => new Date().toISOString();
+function advanceDueDate(fromDate, recurrence) {
+  const d = new Date(fromDate + 'T00:00:00');
+  if (recurrence === 'daily') d.setDate(d.getDate() + 1);
+  else if (recurrence === 'weekly') d.setDate(d.getDate() + 7);
+  else if (recurrence === 'monthly') d.setMonth(d.getMonth() + 1);
+  return d.toISOString().slice(0, 10);
+}
 
 // ---------- SSE subscriber registry (per family) ----------
 const sseClients = new Map(); // familyId -> Set(res)
@@ -849,9 +856,13 @@ route('POST', '/api/chores/:id/complete', async (req, res, p) => {
   const id = uuid();
   db.prepare(`INSERT INTO chore_completions (id,chore_id,completed_by,completed_on,points_awarded,created_at) VALUES (?,?,?,?,?,?)`)
     .run(id, p.id, user.id, completedOn, row.points, now());
-  // non-recurring chores flip to 'completed'; recurring ones stay 'pending' so they show up again next cycle
+  // non-recurring chores flip to 'completed'; recurring ones stay 'pending' and advance their due_date
+  const ts = now();
   if (row.recurrence === 'none') {
-    db.prepare(`UPDATE chores SET status = 'completed', updated_at = ? WHERE id = ?`).run(now(), p.id);
+    db.prepare(`UPDATE chores SET status = 'completed', updated_at = ? WHERE id = ?`).run(ts, p.id);
+  } else {
+    const nextDue = advanceDueDate(completedOn, row.recurrence);
+    db.prepare(`UPDATE chores SET due_date = ?, updated_at = ? WHERE id = ?`).run(nextDue, ts, p.id);
   }
   audit(row.family_id, 'chore', p.id, 'complete', user.id, { status: row.status }, { status: 'completed', completedOn });
   if (row.created_by !== user.id) notify(row.family_id, row.created_by, 'chore_completed', 'Chore completed', `${user.name} completed "${row.title}"`);
@@ -882,6 +893,75 @@ route('GET', '/api/families/:familyId/chores/leaderboard', async (req, res, p) =
   }
   const leaderboard = Object.values(byUser).sort((a, b) => b.points - a.points);
   sendJson(res, 200, { leaderboard, weekStart: since });
+});
+
+route('GET', '/api/families/:familyId/chores/streaks', async (req, res, p) => {
+  const user = requireAuth(req, res); if (!user) return;
+  if (!requireFamily(req, res, user, p.familyId)) return;
+  if (!requirePermission(req, res, user, 'chores:view')) return;
+  // streak: consecutive days ending today or yesterday
+  const allRows = db.prepare(`
+    SELECT DISTINCT cc.completed_by, cc.completed_on, u.name, u.avatar_color
+    FROM chore_completions cc
+    JOIN chores c ON c.id = cc.chore_id
+    JOIN users u ON u.id = cc.completed_by
+    WHERE c.family_id = ?
+    ORDER BY cc.completed_by, cc.completed_on DESC
+  `).all(p.familyId);
+  const byUser = {};
+  for (const row of allRows) {
+    (byUser[row.completed_by] ||= { name: row.name, avatarColor: row.avatar_color, dates: [] }).dates.push(row.completed_on);
+  }
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const prevStr = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const streaks = Object.entries(byUser).map(([userId, info]) => {
+    const dates = info.dates; // already sorted desc
+    if (!dates.length || (dates[0] !== todayStr && dates[0] !== prevStr)) return { userId, name: info.name, avatarColor: info.avatarColor, streak: 0 };
+    let streak = 1;
+    for (let i = 1; i < dates.length; i++) {
+      const expected = new Date(new Date(dates[i - 1] + 'T00:00:00') - 86400000).toISOString().slice(0, 10);
+      if (dates[i] === expected) streak++;
+      else break;
+    }
+    return { userId, name: info.name, avatarColor: info.avatarColor, streak };
+  }).filter((s) => s.streak > 0).sort((a, b) => b.streak - a.streak);
+
+  // recent history: last 15 completions
+  const histRows = db.prepare(`
+    SELECT cc.completed_on, cc.points_awarded, c.title as chore_title,
+           u.name as completer_name, u.avatar_color
+    FROM chore_completions cc
+    JOIN chores c ON c.id = cc.chore_id
+    JOIN users u ON u.id = cc.completed_by
+    WHERE c.family_id = ?
+    ORDER BY cc.completed_on DESC, cc.id DESC LIMIT 15
+  `).all(p.familyId);
+  sendJson(res, 200, { streaks, history: histRows.map((r) => ({
+    choreTitle: r.chore_title, completerName: r.completer_name,
+    avatarColor: r.avatar_color, completedOn: r.completed_on, pointsAwarded: r.points_awarded,
+  })) });
+});
+
+// ---- Activity feed (all roles) ----
+route('GET', '/api/families/:familyId/activity', async (req, res, p) => {
+  const user = requireAuth(req, res); if (!user) return;
+  if (!requireFamily(req, res, user, p.familyId)) return;
+  const rows = db.prepare(`
+    SELECT a.id, a.entity_type, a.action, a.created_at,
+           u.name as actor_name, u.avatar_color as actor_avatar_color
+    FROM audit_logs a
+    LEFT JOIN users u ON u.id = a.actor_id
+    WHERE a.family_id = ?
+    ORDER BY a.created_at DESC LIMIT 20
+  `).all(p.familyId);
+  sendJson(res, 200, { activity: rows.map((r) => ({
+    id: r.id,
+    actorName: r.actor_name || 'Someone',
+    actorAvatarColor: r.actor_avatar_color || '#6366f1',
+    entityType: r.entity_type,
+    action: r.action,
+    createdAt: r.created_at,
+  })) });
 });
 
 // ---- Audit log ----
@@ -979,6 +1059,46 @@ const server = http.createServer(async (req, res) => {
   }
   err(res, 404, 'NOT_FOUND', `No route for ${req.method} ${pathname}`);
 });
+
+// ---------- event reminder scheduler ----------
+// Runs every 60s; fires a notification when an event is about to start.
+// reminderMinutesBefore is stored per-family in settings_json (default 60).
+// Dedup key: `${eventId}:${userId}:${startAt}` — per occurrence + per user.
+const sentReminders = new Set();
+function runReminderCheck() {
+  try {
+    const families = db.prepare(`SELECT id, settings_json FROM families`).all();
+    for (const fam of families) {
+      let settings = {};
+      try { settings = JSON.parse(fam.settings_json || '{}'); } catch {}
+      const minutes = Number(settings.reminderMinutesBefore) || 0;
+      if (!minutes) continue;
+      // window: [now + minutes - 1min, now + minutes + 1min]
+      const windowStart = new Date(Date.now() + (minutes - 1) * 60000);
+      const windowEnd   = new Date(Date.now() + (minutes + 1) * 60000);
+      const rows = db.prepare(`SELECT * FROM events WHERE family_id = ? AND deleted = 0`).all(fam.id);
+      for (const row of rows) {
+        const occurrences = expandOccurrences(row, windowStart.toISOString(), windowEnd.toISOString());
+        for (const occ of occurrences) {
+          const assignees = db.prepare(`SELECT user_id FROM event_assignments WHERE event_id = ?`).all(row.id);
+          for (const a of assignees) {
+            const key = `${row.id}:${a.user_id}:${occ.startAt}`;
+            if (sentReminders.has(key)) continue;
+            sentReminders.add(key);
+            const minsLabel = minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`;
+            notify(fam.id, a.user_id, 'event_reminder',
+              `Reminder: ${occ.title}`,
+              `Starting in ${minsLabel} at ${new Date(occ.startAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`,
+              row.id);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    logger.warn('reminders', `Reminder check failed: ${e.message}`);
+  }
+}
+setInterval(runReminderCheck, 60000);
 
 server.listen(PORT, () => {
   logger.info('server', `FamilyOS backend listening on http://localhost:${PORT}`);

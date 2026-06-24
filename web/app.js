@@ -48,9 +48,22 @@ function toast(msg, isError = false) {
 }
 
 // ---------- router ----------
-const ROUTES = ['login', 'dashboard', 'calendar', 'budget', 'meals', 'chores', 'members', 'settings', 'notifications', 'audit'];
+const ROUTES = ['login', 'dashboard', 'calendar', 'search', 'budget', 'meals', 'chores', 'members', 'settings', 'notifications', 'audit'];
 function navigate(route) { location.hash = `#/${route}`; }
 window.addEventListener('hashchange', render);
+
+// ---------- dark mode ----------
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', localStorage.getItem('familyos_dark') === '1' ? 'dark' : 'light');
+}
+function toggleDark() {
+  const nowDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  localStorage.setItem('familyos_dark', nowDark ? '0' : '1');
+  applyTheme();
+  // update all toggle button labels in-place
+  document.querySelectorAll('.dark-toggle-btn').forEach((b) => { b.textContent = nowDark ? '🌙 Dark mode' : '☀️ Light mode'; });
+}
+applyTheme();
 
 // Pick up ?token= from Google OAuth redirect and store it
 (function absorbOAuthToken() {
@@ -161,6 +174,7 @@ function Shell(route) {
     <div class="brand"><span class="dot"></span> FamilyOS</div>
     ${navLink('dashboard', '🏠', 'Dashboard', route)}
     ${navLink('calendar', '📅', 'Calendar', route)}
+    ${navLink('search', '🔍', 'Search', route)}
     ${!isChild ? navLink('budget', '💰', 'Budget', route) : ''}
     ${navLink('meals', '🍽️', 'Meal Plan', route)}
     ${navLink('chores', '✅', 'Chores', route)}
@@ -178,6 +192,7 @@ function Shell(route) {
       </div>
     </div>
     <div class="nav-link" id="logout-btn">↪ Switch user</div>
+    <div class="nav-link dark-toggle-btn" id="dark-toggle-btn">${localStorage.getItem('familyos_dark') === '1' ? '☀️ Light mode' : '🌙 Dark mode'}</div>
   `;
 
   function closeSidebar() { sidebar.classList.remove('open'); backdrop.classList.remove('open'); }
@@ -185,6 +200,7 @@ function Shell(route) {
     el.addEventListener('click', () => { navigate(el.dataset.route); closeSidebar(); });
   });
   sidebar.querySelector('#logout-btn').addEventListener('click', logout);
+  sidebar.querySelector('#dark-toggle-btn').addEventListener('click', toggleDark);
   backdrop.addEventListener('click', closeSidebar);
 
   const topbar = document.createElement('div');
@@ -242,6 +258,7 @@ function screenFor(route) {
     try {
       if (route === 'dashboard') el.innerHTML = await DashboardScreen();
       else if (route === 'calendar') el.innerHTML = await CalendarScreen();
+      else if (route === 'search') el.innerHTML = await SearchScreen();
       else if (route === 'budget') el.innerHTML = await BudgetScreen();
       else if (route === 'meals') el.innerHTML = await MealsScreen();
       else if (route === 'chores') el.innerHTML = await ChoresScreen();
@@ -379,7 +396,47 @@ async function DashboardScreen() {
 
     ${choresWidget}
     ${leaderboardWidget}
+    ${await activityFeedWidget(fam)}
   `;
+}
+async function activityFeedWidget(familyId) {
+  try {
+    const { activity } = await api(`/api/families/${familyId}/activity`);
+    if (!activity.length) return '';
+    const label = (entityType, action) => {
+      const map = {
+        'event:created': 'added an event', 'event:updated': 'updated an event', 'event:deleted': 'removed an event',
+        'event:settings_update': 'updated family settings',
+        'chore:created': 'added a chore', 'chore:updated': 'updated a chore', 'chore:deleted': 'removed a chore',
+        'chore:completed': 'completed a chore',
+        'budget_category:created': 'added a budget category', 'budget_category:updated': 'updated a budget category', 'budget_category:deleted': 'removed a budget category',
+        'budget_transaction:created': 'logged a transaction', 'budget_transaction:deleted': 'deleted a transaction',
+        'meal:created': 'added a meal', 'meal:updated': 'updated a meal', 'meal:deleted': 'removed a meal',
+        'member:invited': 'invited a family member', 'member:updated': 'updated a member',
+        'family:settings_update': 'updated family settings',
+      };
+      return map[`${entityType}:${action}`] || `${action.replace(/_/g, ' ')} a ${entityType.replace(/_/g, ' ')}`;
+    };
+    const timeAgo = (iso) => {
+      const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+      if (s < 60) return 'just now';
+      if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+      if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+      return `${Math.floor(s / 86400)}d ago`;
+    };
+    return `
+      <div class="card">
+        <h3>Recent activity</h3>
+        ${activity.map((a) => `
+          <div class="event-row">
+            <div class="avatar sm" style="background:${a.actorAvatarColor}">${initials(a.actorName)}</div>
+            <div style="flex:1;">
+              <div class="event-title">${escapeHtml(a.actorName)} <span style="font-weight:400;">${label(a.entityType, a.action)}</span></div>
+            </div>
+            <div class="muted" style="font-size:12px; flex-shrink:0;">${timeAgo(a.createdAt)}</div>
+          </div>`).join('')}
+      </div>`;
+  } catch { return ''; }
 }
 function dayPart() { const h = new Date().getHours(); return h < 12 ? 'morning' : h < 18 ? 'afternoon' : 'evening'; }
 function sameDay(a, b) { return a.toDateString() === b.toDateString(); }
@@ -396,6 +453,36 @@ function eventRowHtml(e) {
   </div>`;
 }
 function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+function exportIcal(events) {
+  const icalDate = (iso) => iso.replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const fold = (line) => {
+    const chars = [...line]; const out = [];
+    for (let i = 0; i < chars.length; i += 75) out.push(chars.slice(i, i + 75).join(''));
+    return out.join('\r\n ');
+  };
+  const esc = (s) => (s || '').replace(/[\\,;]/g, (c) => '\\' + c).replace(/\n/g, '\\n');
+  const lines = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//FamilyOS//FamilyOS MVP//EN',
+    'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+  ];
+  for (const e of events) {
+    lines.push('BEGIN:VEVENT');
+    lines.push(fold(`UID:${e.id}@familyos`));
+    lines.push(fold(`DTSTART:${icalDate(e.startAt)}`));
+    lines.push(fold(`DTEND:${icalDate(e.endAt)}`));
+    lines.push(fold(`SUMMARY:${esc(e.title)}`));
+    if (e.location) lines.push(fold(`LOCATION:${esc(e.location)}`));
+    if (e.description) lines.push(fold(`DESCRIPTION:${esc(e.description)}`));
+    lines.push('END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `familyos-${new Date().toISOString().slice(0, 7)}.ics`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 function markInvalid(inputEl) {
   const field = inputEl.closest('.field') || inputEl.parentElement;
   field.classList.add('field-error');
@@ -403,6 +490,41 @@ function markInvalid(inputEl) {
   const clear = () => { field.classList.remove('field-error'); inputEl.removeEventListener('input', clear); inputEl.removeEventListener('change', clear); };
   inputEl.addEventListener('input', clear);
   inputEl.addEventListener('change', clear);
+}
+
+// ---------- SEARCH ----------
+async function SearchScreen() {
+  const past = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  const future = new Date(Date.now() + 180 * 86400000).toISOString().slice(0, 10);
+  return `
+    <div class="row between"><h1>Search Events</h1></div>
+    <div class="card" style="margin-bottom:16px;">
+      <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">
+        <div class="field" style="flex:2; min-width:160px; margin:0;">
+          <label>Keyword</label>
+          <input id="search-q" placeholder="Title, location, or provider…" />
+        </div>
+        <div class="field" style="flex:1; min-width:130px; margin:0;">
+          <label>Type</label>
+          <select id="search-cat">
+            <option value="">All types</option>
+            <option value="general">General</option>
+            <option value="appointment">Appointment</option>
+          </select>
+        </div>
+        <div class="field" style="flex:1; min-width:120px; margin:0;">
+          <label>From</label>
+          <input type="date" id="search-from" value="${past}" />
+        </div>
+        <div class="field" style="flex:1; min-width:120px; margin:0;">
+          <label>To</label>
+          <input type="date" id="search-to" value="${future}" />
+        </div>
+        <button class="btn" id="search-btn" style="flex:none;">Search</button>
+      </div>
+    </div>
+    <div id="search-results" class="muted" style="text-align:center; padding:32px 0;">Enter a keyword or date range and press Search.</div>
+  `;
 }
 
 // ---------- CALENDAR ----------
@@ -430,6 +552,7 @@ async function CalendarScreen() {
         <button class="btn sm" id="add-event-btn">+ New event</button>
       </div>
     </div>
+    <button class="btn secondary sm" id="ical-export-btn" style="margin-bottom:12px;">⬇ Export .ics</button>
     <div class="card">
       <div class="calendar-grid" style="margin-bottom:6px;">
         ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => `<div class="muted" style="text-align:center; font-weight:700; font-size:11px;">${d}</div>`).join('')}
@@ -489,6 +612,25 @@ async function BudgetScreen() {
         </div>`).join('')}
     </div>
 
+    ${sumRes.categories.length ? `
+    <div class="card">
+      <h3>Spending by category</h3>
+      ${sumRes.categories.map((c) => {
+        const pct = c.monthlyLimit > 0 ? Math.min(100, (c.spent / c.monthlyLimit) * 100) : 0;
+        const barColor = c.overBudget ? 'var(--red)' : c.color;
+        return `
+          <div style="margin-bottom:12px;">
+            <div class="row between" style="margin-bottom:4px; font-size:13px;">
+              <span style="font-weight:600;">${escapeHtml(c.name)}</span>
+              <span class="muted">$${c.spent.toFixed(2)} / $${c.monthlyLimit.toFixed(2)}</span>
+            </div>
+            <div class="budget-bar-track">
+              <div class="budget-bar-fill" style="width:${pct}%; background:${barColor};"></div>
+            </div>
+          </div>`;
+      }).join('')}
+    </div>` : ''}
+
     <div class="card">
       <h3>Transactions this household has logged</h3>
       <table>
@@ -523,7 +665,12 @@ async function MealsScreen() {
   const cookName = (id) => { const m = state.members.find((x) => x.id === id); return m ? m.name.split(' ')[0] : 'Unassigned'; };
 
   return `
-    <div class="row between"><h1>Meal Plan</h1>${canManage ? '<button class="btn sm" id="add-meal-btn">+ Add meal</button>' : ''}</div>
+    <div class="row between"><h1>Meal Plan</h1>
+      <div class="flex-gap">
+        <button class="btn secondary sm" id="shopping-list-btn">🛒 Shopping list</button>
+        ${canManage ? '<button class="btn sm" id="add-meal-btn">+ Add meal</button>' : ''}
+      </div>
+    </div>
     <p class="subtitle">Next two weeks · ${meals.length} planned meal${meals.length === 1 ? '' : 's'}</p>
     ${dates.length ? dates.map((date) => `
       <div class="card">
@@ -565,17 +712,47 @@ async function ChoresScreen() {
     </div>`;
   }
 
+  let streaksWidget = '';
+  let historyWidget = '';
+  try {
+    const { streaks, history } = await api(`/api/families/${fam}/chores/streaks`);
+    if (streaks.length) {
+      streaksWidget = `
+        <div class="card">
+          <h3>Streaks 🔥</h3>
+          ${streaks.map((s) => `
+            <div class="event-row">
+              <div class="avatar sm" style="background:${s.avatarColor}">${initials(s.name)}</div>
+              <div style="flex:1;"><div class="event-title">${escapeHtml(s.name)}</div></div>
+              <div style="font-weight:800; font-size:16px; color:var(--amber);">${s.streak} day${s.streak === 1 ? '' : 's'} 🔥</div>
+            </div>`).join('')}
+        </div>`;
+    }
+    if (history.length) {
+      historyWidget = `
+        <div class="card">
+          <h3>Completion history</h3>
+          ${history.map((h) => `
+            <div class="event-row">
+              <div class="avatar sm" style="background:${h.avatarColor}">${initials(h.completerName)}</div>
+              <div style="flex:1;">
+                <div class="event-title">${escapeHtml(h.choreTitle)}</div>
+                <div class="event-meta">by ${escapeHtml(h.completerName)} · ${h.completedOn} · +${h.pointsAwarded} pts</div>
+              </div>
+            </div>`).join('')}
+        </div>`;
+    }
+  } catch { /* streaks endpoint may not exist on older data */ }
+
   return `
     <div class="row between"><h1>Chores</h1>${canManage ? '<button class="btn sm" id="add-chore-btn">+ Add chore</button>' : ''}</div>
     <p class="subtitle">${pending.length} pending · ${completed.length} completed</p>
+    ${streaksWidget}
     <div class="card">
       <h3>To do</h3>
       ${pending.length ? pending.map(choreRow).join('') : '<div class="empty-state">Nothing pending — nice work!</div>'}
     </div>
-    <div class="card">
-      <h3>Recently completed</h3>
-      ${completed.length ? completed.slice(0, 10).map(choreRow).join('') : '<div class="empty-state">No completed chores yet.</div>'}
-    </div>
+    ${historyWidget}
   `;
 }
 
@@ -969,6 +1146,7 @@ function wireScreenEvents(route) {
     });
     document.querySelectorAll('#cal-prev').forEach((b) => b.onclick = () => { calCursor.setMonth(calCursor.getMonth() - 1); render(); });
     document.querySelectorAll('#cal-next').forEach((b) => b.onclick = () => { calCursor.setMonth(calCursor.getMonth() + 1); render(); });
+    document.querySelectorAll('#ical-export-btn').forEach((b) => b.onclick = () => { exportIcal(state.events); toast('Downloading .ics file'); });
     document.querySelectorAll('.role-select').forEach((sel) => {
       let prevRole = sel.value;
       sel.onchange = async () => {
@@ -1043,6 +1221,8 @@ function wireScreenEvents(route) {
     });
 
     // meals
+    const shoppingListBtn = document.querySelector('#shopping-list-btn');
+    if (shoppingListBtn) shoppingListBtn.onclick = () => openShoppingListModal();
     const addMealBtn = document.querySelector('#add-meal-btn');
     if (addMealBtn) addMealBtn.onclick = () => openMealModal();
     document.querySelectorAll('.remove-meal').forEach((b) => {
@@ -1069,7 +1249,120 @@ function wireScreenEvents(route) {
         toast('Chore deleted'); render();
       };
     });
+
+    // search
+    const searchBtn = document.querySelector('#search-btn');
+    if (searchBtn) {
+      const doSearch = async () => {
+        const q = (document.querySelector('#search-q').value || '').trim().toLowerCase();
+        const cat = document.querySelector('#search-cat').value;
+        const fromVal = document.querySelector('#search-from').value;
+        const toVal = document.querySelector('#search-to').value;
+        const resultsEl = document.getElementById('search-results');
+        resultsEl.innerHTML = `<div class="screen-loading"><div class="spinner"></div></div>`;
+        try {
+          const start = fromVal ? new Date(fromVal + 'T00:00:00').toISOString() : new Date(Date.now() - 90 * 86400000).toISOString();
+          const end = toVal ? new Date(toVal + 'T23:59:59').toISOString() : new Date(Date.now() + 180 * 86400000).toISOString();
+          let url = `/api/families/${state.user.familyId}/events?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+          if (cat) url += `&category=${encodeURIComponent(cat)}`;
+          const { events } = await api(url);
+          state.events = events;
+          const filtered = q ? events.filter((e) =>
+            e.title.toLowerCase().includes(q) ||
+            (e.provider || '').toLowerCase().includes(q) ||
+            (e.location || '').toLowerCase().includes(q)
+          ) : events;
+          if (filtered.length === 0) {
+            resultsEl.innerHTML = `<div class="empty-state">No events match your search.</div>`;
+            return;
+          }
+          const byDate = {};
+          filtered.forEach((e) => { const k = new Date(e.startAt).toDateString(); (byDate[k] ||= []).push(e); });
+          let html = '';
+          Object.entries(byDate).forEach(([ds, dayEvs]) => {
+            const d = new Date(ds);
+            html += `<div class="event-date-header">${sameDay(d, new Date()) ? 'Today · ' : ''}${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>`;
+            html += dayEvs.map(eventRowHtml).join('');
+          });
+          resultsEl.innerHTML = `<div class="card">${html}<p class="muted" style="padding:8px 0 4px; text-align:right; font-size:12px;">${filtered.length} event${filtered.length !== 1 ? 's' : ''} found</p></div>`;
+          resultsEl.querySelectorAll('.event-row[data-eid]').forEach((row) => {
+            row.onclick = () => {
+              const ev = state.events.find((e) => (e.masterId || e.id) === row.dataset.eid);
+              if (ev) openEventModal(ev);
+            };
+          });
+        } catch (e) {
+          resultsEl.innerHTML = `<div class="empty-state">Search failed: ${e.message}</div>`;
+        }
+      };
+      searchBtn.onclick = doSearch;
+      document.querySelector('#search-q').onkeydown = (ev) => { if (ev.key === 'Enter') doSearch(); };
+    }
   }, 0);
+}
+
+function openShoppingListModal() {
+  const meals = state.meals || [];
+  const byDate = {};
+  meals.forEach((m) => { (byDate[m.mealDate] ||= []).push(m); });
+  const dates = Object.keys(byDate).sort();
+  const weekLabel = dates.length
+    ? `Week of ${new Date(dates[0] + 'T00:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' })}`
+    : 'Upcoming meals';
+  const generatedDate = new Date().toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+
+  const lines = [
+    `FamilyOS Shopping List — ${weekLabel}`,
+    `Generated ${generatedDate}`,
+    '',
+  ];
+  dates.forEach((date) => {
+    lines.push(new Date(date + 'T00:00:00').toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }) + ':');
+    (byDate[date] || []).forEach((m) => {
+      const type = m.mealType.charAt(0).toUpperCase() + m.mealType.slice(1);
+      lines.push(`  ${type}: ${m.title}${m.notes ? ' (' + m.notes + ')' : ''}`);
+    });
+    lines.push('');
+  });
+  if (!dates.length) lines.push('  No meals planned yet.');
+
+  const plainText = lines.join('\n');
+  const htmlRows = dates.map((date) => `
+    <div style="margin-bottom:12px;">
+      <div style="font-weight:700; margin-bottom:4px;">${new Date(date + 'T00:00:00').toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })}</div>
+      ${(byDate[date] || []).map((m) => `
+        <div class="event-row" style="padding:4px 8px;">
+          <span class="badge member" style="text-transform:capitalize; flex-shrink:0;">${m.mealType}</span>
+          <div style="flex:1;">${escapeHtml(m.title)}${m.notes ? '<span class="muted"> — ' + escapeHtml(m.notes) + '</span>' : ''}</div>
+        </div>`).join('')}
+    </div>`).join('');
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal" style="max-width:480px;">
+      <h3 style="margin-top:0;">🛒 Shopping List</h3>
+      <p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:13px;">${weekLabel} · ${generatedDate}</p>
+      <div style="max-height:360px; overflow-y:auto;">
+        ${dates.length ? htmlRows : '<div class="empty-state">No meals planned yet.</div>'}
+      </div>
+      <div class="row" style="justify-content:flex-end; gap:8px; margin-top:16px;">
+        <button class="btn secondary" id="sl-cancel">Close</button>
+        <button class="btn" id="sl-copy">Copy as text</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('#sl-cancel').onclick = () => backdrop.remove();
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+  backdrop.querySelector('#sl-copy').onclick = () => {
+    navigator.clipboard.writeText(plainText).then(() => toast('Copied to clipboard')).catch(() => {
+      // fallback: select a hidden textarea
+      const ta = document.createElement('textarea');
+      ta.value = plainText; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+      ta.remove(); toast('Copied to clipboard');
+    });
+  };
 }
 
 function openInviteModal() {
