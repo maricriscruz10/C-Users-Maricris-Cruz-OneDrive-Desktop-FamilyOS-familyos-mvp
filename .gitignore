@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Database
+backend/data/*.db
+backend/data/*.db-journal
+
+# Logs
+backend/logs/
+
+# Environment
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/

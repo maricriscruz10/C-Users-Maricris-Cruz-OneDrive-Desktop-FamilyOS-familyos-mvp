@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "FamilyOS",
+    "slug": "familyos",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": { "backgroundColor": "#6366f1" },
+    "ios": { "supportsTablet": true, "bundleIdentifier": "com.familyos.app" },
+    "android": {
+      "adaptiveIcon": { "backgroundColor": "#6366f1" },
+      "package": "com.familyos.app",
+      "permissions": ["NOTIFICATIONS"]
+    },
+    "plugins": ["expo-notifications"]
+  }
+}
