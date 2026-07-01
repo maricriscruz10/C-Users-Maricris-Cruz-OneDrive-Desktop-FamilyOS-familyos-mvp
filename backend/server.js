@@ -128,12 +128,13 @@ function budgetCategoryOut(c) {
 }
 function budgetTransactionOut(t) {
   return { id: t.id, familyId: t.family_id, categoryId: t.category_id, amount: t.amount,
-    description: t.description, occurredOn: t.occurred_on, createdBy: t.created_by, createdAt: t.created_at };
+    description: t.description, occurredOn: t.occurred_on, paymentMethod: t.payment_method || 'cash',
+    receiptImage: t.receipt_image || null, createdBy: t.created_by, createdAt: t.created_at };
 }
 function mealOut(m) {
   return { id: m.id, familyId: m.family_id, mealDate: m.meal_date, mealType: m.meal_type,
-    title: m.title, notes: m.notes, assignedCook: m.assigned_cook, createdBy: m.created_by,
-    createdAt: m.created_at, updatedAt: m.updated_at };
+    title: m.title, notes: m.notes, calories: m.calories || 0, assignedCook: m.assigned_cook,
+    createdBy: m.created_by, createdAt: m.created_at, updatedAt: m.updated_at };
 }
 function choreOut(c) {
   return { id: c.id, familyId: c.family_id, title: c.title, description: c.description,
@@ -416,11 +417,17 @@ route('POST', '/api/families/:familyId/members/invite', async (req, res, p) => {
 route('PATCH', '/api/families/:familyId/members/:userId', async (req, res, p) => {
   const user = requireAuth(req, res); if (!user) return;
   if (!requireFamily(req, res, user, p.familyId)) return;
-  if (!requirePermission(req, res, user, 'members:role:change')) return;
   const target = db.prepare(`SELECT * FROM users WHERE id = ? AND family_id = ?`).get(p.userId, p.familyId);
   if (!target) return err(res, 404, 'NOT_FOUND', 'Member not found');
   const body = await readBody(req);
-  if (target.role === 'admin' && body.role && body.role !== 'admin') {
+  const isSelf = user.id === p.userId;
+  const isAdmin = user.role === 'admin';
+  // Role changes require admin permission
+  if (body.role && !requirePermission(req, res, user, 'members:role:change')) return;
+  // Name changes allowed for self OR admin
+  if (body.name && !isSelf && !isAdmin) return err(res, 403, 'FORBIDDEN', 'You can only edit your own name');
+  if (!body.role && !body.name) return err(res, 400, 'VALIDATION', 'Provide role or name to update');
+  if (body.role && target.role === 'admin' && body.role !== 'admin') {
     const adminCount = db.prepare(`SELECT COUNT(*) c FROM users WHERE family_id = ? AND role = 'admin' AND status != 'disabled'`).get(p.familyId).c;
     if (adminCount <= 1) return err(res, 409, 'LAST_ADMIN', 'Cannot demote the only admin — assign another admin first');
   }
@@ -428,7 +435,7 @@ route('PATCH', '/api/families/:familyId/members/:userId', async (req, res, p) =>
   db.prepare(`UPDATE users SET role = COALESCE(?, role), name = COALESCE(?, name) WHERE id = ?`)
     .run(body.role || null, body.name || null, p.userId);
   const after = userOut(db.prepare(`SELECT * FROM users WHERE id=?`).get(p.userId));
-  audit(p.familyId, 'user', p.userId, 'role_change', user.id, before, after);
+  audit(p.familyId, 'user', p.userId, 'update', user.id, before, after);
   if (body.role) notify(p.familyId, p.userId, 'role_changed', 'Your role changed', `Your role is now ${body.role}`);
   broadcast(p.familyId, 'member_updated', { userId: p.userId });
   sendJson(res, 200, { member: after }, req);
@@ -686,8 +693,8 @@ route('POST', '/api/families/:familyId/budget/transactions', async (req, res, p)
   if (!cat) return err(res, 404, 'NOT_FOUND', 'Budget category not found in this family');
   const id = uuid();
   const ts = now();
-  db.prepare(`INSERT INTO budget_transactions (id,family_id,category_id,amount,description,occurred_on,created_by,created_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run(id, p.familyId, body.categoryId, body.amount, body.description || '', body.occurredOn, user.id, ts);
+  db.prepare(`INSERT INTO budget_transactions (id,family_id,category_id,amount,description,occurred_on,payment_method,receipt_image,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, p.familyId, body.categoryId, body.amount, body.description || '', body.occurredOn, body.paymentMethod || 'cash', body.receiptImage || null, user.id, ts);
   audit(p.familyId, 'budget_transaction', id, 'create', user.id, null, body);
   const row = db.prepare(`SELECT * FROM budget_transactions WHERE id=?`).get(id);
   broadcast(p.familyId, 'budget_updated', { transactionId: id });
@@ -742,8 +749,8 @@ route('POST', '/api/families/:familyId/meals', async (req, res, p) => {
   if (!['breakfast', 'lunch', 'dinner', 'snack'].includes(body.mealType)) return err(res, 400, 'VALIDATION', 'mealType must be breakfast|lunch|dinner|snack');
   const id = uuid();
   const ts = now();
-  db.prepare(`INSERT INTO meal_plan_entries (id,family_id,meal_date,meal_type,title,notes,assigned_cook,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, p.familyId, body.mealDate, body.mealType, body.title, body.notes || '', body.assignedCook || null, user.id, ts, ts);
+  db.prepare(`INSERT INTO meal_plan_entries (id,family_id,meal_date,meal_type,title,notes,calories,assigned_cook,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, p.familyId, body.mealDate, body.mealType, body.title, body.notes || '', body.calories || 0, body.assignedCook || null, user.id, ts, ts);
   audit(p.familyId, 'meal', id, 'create', user.id, null, body);
   if (body.assignedCook && body.assignedCook !== user.id) notify(p.familyId, body.assignedCook, 'meal_assigned', 'You\'re cooking', `You're assigned to make "${body.title}" on ${body.mealDate}`);
   const row = db.prepare(`SELECT * FROM meal_plan_entries WHERE id=?`).get(id);
@@ -761,8 +768,8 @@ route('PUT', '/api/meals/:id', async (req, res, p) => {
   const before = mealOut(row);
   db.prepare(`UPDATE meal_plan_entries SET title = COALESCE(?, title), notes = COALESCE(?, notes),
       meal_type = COALESCE(?, meal_type), meal_date = COALESCE(?, meal_date), assigned_cook = COALESCE(?, assigned_cook),
-      updated_at = ? WHERE id = ?`)
-    .run(body.title || null, body.notes ?? null, body.mealType || null, body.mealDate || null, body.assignedCook || null, now(), p.id);
+      calories = COALESCE(?, calories), updated_at = ? WHERE id = ?`)
+    .run(body.title || null, body.notes ?? null, body.mealType || null, body.mealDate || null, body.assignedCook || null, body.calories ?? null, now(), p.id);
   const after = mealOut(db.prepare(`SELECT * FROM meal_plan_entries WHERE id=?`).get(p.id));
   audit(row.family_id, 'meal', p.id, 'update', user.id, before, after);
   broadcast(row.family_id, 'meal_updated', { mealId: p.id });

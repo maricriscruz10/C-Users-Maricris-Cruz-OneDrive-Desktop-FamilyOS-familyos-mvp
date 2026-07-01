@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, RefreshControl, Modal, TextInput, ScrollView, Alert } from 'react-native';
 import { Api } from '../api';
-import { colors, initials } from '../theme';
+import { colors } from '../theme';
 
 const MEAL_TYPES = ['breakfast', 'lunch', 'dinner', 'snack'];
 
@@ -27,6 +27,7 @@ export default function MealsScreen({ user, familyId, members }) {
 
   const grouped = groupByDate(meals);
   const cookName = (id) => { const m = members.find((x) => x.id === id); return m ? m.name.split(' ')[0] : 'Unassigned'; };
+  const totalCals = meals.reduce((s, m) => s + (m.calories || 0), 0);
 
   const remove = (id) => Alert.alert('Delete meal?', '', [
     { text: 'Cancel', style: 'cancel' },
@@ -38,7 +39,9 @@ export default function MealsScreen({ user, familyId, members }) {
       <View style={styles.header}>
         <View>
           <Text style={styles.title}>Meal Plan</Text>
-          <Text style={styles.subtitle}>{meals.length} planned meal{meals.length === 1 ? '' : 's'}</Text>
+          <Text style={styles.subtitle}>
+            {meals.length} meal{meals.length === 1 ? '' : 's'}{totalCals > 0 ? ` · ~${totalCals.toLocaleString()} cal total` : ''}
+          </Text>
         </View>
         {canManage && (
           <TouchableOpacity style={styles.addBtn} onPress={() => setModalOpen(true)}>
@@ -52,23 +55,31 @@ export default function MealsScreen({ user, familyId, members }) {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         contentContainerStyle={{ padding: 16 }}
         ListEmptyComponent={<Text style={styles.empty}>No meals planned yet.</Text>}
-        renderItem={({ item }) => (
-          <View style={{ marginBottom: 16 }}>
-            <Text style={styles.dayLabel}>{item.label}</Text>
-            {item.meals.map((m) => (
-              <View key={m.id} style={styles.card}>
-                <View style={styles.mealTypeBadge}><Text style={styles.mealTypeText}>{m.mealType}</Text></View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.mealTitle}>{m.title}</Text>
-                  <Text style={styles.meta}>{m.notes ? m.notes + ' · ' : ''}👨‍🍳 {cookName(m.assignedCook)}</Text>
-                </View>
-                {canManage && (
-                  <TouchableOpacity onPress={() => remove(m.id)}><Text style={styles.deleteText}>✕</Text></TouchableOpacity>
-                )}
+        renderItem={({ item }) => {
+          const dayCals = item.meals.reduce((s, m) => s + (m.calories || 0), 0);
+          return (
+            <View style={{ marginBottom: 16 }}>
+              <View style={styles.dayHeader}>
+                <Text style={styles.dayLabel}>{item.label}</Text>
+                {dayCals > 0 && <Text style={styles.dayCals}>🔥 {dayCals.toLocaleString()} cal</Text>}
               </View>
-            ))}
-          </View>
-        )}
+              {item.meals.map((m) => (
+                <View key={m.id} style={styles.card}>
+                  <View style={styles.mealTypeBadge}><Text style={styles.mealTypeText}>{m.mealType}</Text></View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.mealTitle}>{m.title}</Text>
+                    <Text style={styles.meta}>
+                      {m.notes ? m.notes + ' · ' : ''}👨‍🍳 {cookName(m.assignedCook)}{m.calories ? ` · 🔥 ${m.calories} cal` : ''}
+                    </Text>
+                  </View>
+                  {canManage && (
+                    <TouchableOpacity onPress={() => remove(m.id)}><Text style={styles.deleteText}>✕</Text></TouchableOpacity>
+                  )}
+                </View>
+              ))}
+            </View>
+          );
+        }}
       />
       <MealModal visible={modalOpen} members={members} familyId={familyId}
         onClose={() => setModalOpen(false)} onSaved={() => { setModalOpen(false); load(); }} />
@@ -93,13 +104,14 @@ function MealModal({ visible, members, familyId, onClose, onSaved }) {
   const [mealType, setMealType] = useState('dinner');
   const [title, setTitle] = useState('');
   const [notes, setNotes] = useState('');
+  const [calories, setCalories] = useState('');
   const [assignedCook, setAssignedCook] = useState(null);
 
   const save = async () => {
     if (!title.trim()) return Alert.alert('Title required');
     try {
-      await Api.createMeal(familyId, { mealDate, mealType, title, notes, assignedCook });
-      setTitle(''); setNotes('');
+      await Api.createMeal(familyId, { mealDate, mealType, title, notes, calories: Number(calories) || 0, assignedCook });
+      setTitle(''); setNotes(''); setCalories('');
       onSaved();
     } catch (e) {
       Alert.alert('Error', e.message);
@@ -111,7 +123,7 @@ function MealModal({ visible, members, familyId, onClose, onSaved }) {
       <ScrollView style={{ flex: 1, backgroundColor: colors.bg }} contentContainerStyle={{ padding: 20, paddingTop: 56 }}>
         <Text style={styles.heading}>Add a meal</Text>
         <Text style={styles.label}>Date (YYYY-MM-DD)</Text>
-        <TextInput style={styles.input} value={mealDate} onChangeText={setMealDate} placeholder="2026-06-24" />
+        <TextInput style={styles.input} value={mealDate} onChangeText={setMealDate} placeholder="2026-07-02" />
         <Text style={styles.label}>Meal</Text>
         <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
           {MEAL_TYPES.map((t) => (
@@ -124,8 +136,13 @@ function MealModal({ visible, members, familyId, onClose, onSaved }) {
         <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="e.g. Taco night" />
         <Text style={styles.label}>Notes</Text>
         <TextInput style={styles.input} value={notes} onChangeText={setNotes} placeholder="optional" />
+        <Text style={styles.label}>Calories (optional)</Text>
+        <TextInput style={styles.input} value={calories} onChangeText={setCalories} keyboardType="number-pad" placeholder="e.g. 450" />
         <Text style={styles.label}>Assigned cook</Text>
         <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+          <TouchableOpacity onPress={() => setAssignedCook(null)} style={[styles.pill, !assignedCook && styles.pillActive]}>
+            <Text style={[styles.pillText, !assignedCook && styles.pillTextActive]}>None</Text>
+          </TouchableOpacity>
           {members.map((m) => (
             <TouchableOpacity key={m.id} onPress={() => setAssignedCook(m.id)} style={[styles.pill, assignedCook === m.id && styles.pillActive]}>
               <Text style={[styles.pillText, assignedCook === m.id && styles.pillTextActive]}>{m.name.split(' ')[0]}</Text>
@@ -151,7 +168,9 @@ const styles = StyleSheet.create({
   subtitle: { fontSize: 12, color: colors.muted },
   addBtn: { backgroundColor: colors.primary, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 10 },
   addBtnText: { color: 'white', fontWeight: '700', fontSize: 13 },
-  dayLabel: { fontSize: 12, fontWeight: '700', color: colors.muted, textTransform: 'uppercase', marginBottom: 8 },
+  dayHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  dayLabel: { fontSize: 12, fontWeight: '700', color: colors.muted, textTransform: 'uppercase' },
+  dayCals: { fontSize: 12, color: colors.muted, fontWeight: '600' },
   card: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: colors.card, borderRadius: 12, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: colors.border },
   mealTypeBadge: { backgroundColor: colors.bg, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 },
   mealTypeText: { fontSize: 10, fontWeight: '700', color: colors.muted, textTransform: 'capitalize' },

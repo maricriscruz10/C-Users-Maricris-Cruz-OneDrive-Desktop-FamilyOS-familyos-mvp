@@ -37,6 +37,7 @@ export const Api = {
   me: () => request('/api/auth/me'),
   family: (id) => request(`/api/families/${id}`),
   members: (id) => request(`/api/families/${id}/members`),
+  updateMember: (familyId, userId, payload) => request(`/api/families/${familyId}/members/${userId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   events: (id, start, end) => request(`/api/families/${id}/events?start=${start}&end=${end}`),
   notifications: () => request('/api/notifications'),
   markNotificationRead: (id) => request(`/api/notifications/${id}/read`, { method: 'POST' }),

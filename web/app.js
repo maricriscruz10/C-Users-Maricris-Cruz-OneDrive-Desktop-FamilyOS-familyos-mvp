@@ -532,6 +532,7 @@ let calCursor = new Date();
 let budgetCursor = new Date();
 async function CalendarScreen() {
   const fam = state.user.familyId;
+  if (!state.members.length) await refreshData();
   const monthStart = new Date(calCursor.getFullYear(), calCursor.getMonth(), 1);
   const monthEnd = new Date(calCursor.getFullYear(), calCursor.getMonth() + 1, 0, 23, 59, 59);
   const gridStart = new Date(monthStart); gridStart.setDate(gridStart.getDate() - gridStart.getDay());
@@ -539,8 +540,20 @@ async function CalendarScreen() {
   const { events } = await api(`/api/families/${fam}/events?start=${gridStart.toISOString()}&end=${gridEnd.toISOString()}`);
   state.events = events;
 
+  const memberColor = (userId) => {
+    const m = state.members.find((x) => x.id === userId);
+    return m ? m.avatarColor : 'var(--primary)';
+  };
+
   const days = [];
   for (let d = new Date(gridStart); d <= gridEnd; d.setDate(d.getDate() + 1)) days.push(new Date(d));
+
+  const legend = state.members.map((m) =>
+    `<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;margin-right:10px;">
+      <span style="width:10px;height:10px;border-radius:50%;background:${m.avatarColor};display:inline-block;"></span>
+      ${escapeHtml(m.name.split(' ')[0])}
+    </span>`
+  ).join('');
 
   return `
     <div class="row between">
@@ -551,6 +564,9 @@ async function CalendarScreen() {
         <button class="btn secondary sm" id="cal-next">→</button>
         <button class="btn sm" id="add-event-btn">+ New event</button>
       </div>
+    </div>
+    <div style="margin-bottom:10px; display:flex; align-items:center; flex-wrap:wrap; gap:4px;">
+      <span class="muted" style="font-size:12px; margin-right:6px;">Color by member:</span>${legend}
     </div>
     <button class="btn secondary sm" id="ical-export-btn" style="margin-bottom:12px;">⬇ Export .ics</button>
     <div class="card">
@@ -564,7 +580,7 @@ async function CalendarScreen() {
           const inMonth = d.getMonth() === calCursor.getMonth();
           return `<div class="cal-day${isToday ? ' today' : ''}" data-date="${d.toISOString()}" style="${inMonth ? '' : 'opacity:0.4;'}">
             <div class="daynum">${d.getDate()}</div>
-            ${dayEvents.slice(0, 3).map((e) => `<div class="cal-pill" title="${escapeHtml(e.title)}">${e.category === 'appointment' ? '📌 ' : ''}${escapeHtml(e.title)}</div>`).join('')}
+            ${dayEvents.slice(0, 3).map((e) => `<div class="cal-pill" style="background:${memberColor(e.createdBy)};" title="${escapeHtml(e.title)}">${e.category === 'appointment' ? '📌 ' : ''}${escapeHtml(e.title)}</div>`).join('')}
             ${dayEvents.length > 3 ? `<div class="muted" style="font-size:10px;">+${dayEvents.length - 3} more</div>` : ''}
           </div>`;
         }).join('')}
@@ -590,6 +606,15 @@ async function BudgetScreen() {
   const monthLabel = budgetCursor.toLocaleString([], { month: 'long', year: 'numeric' });
 
   const catName = (id) => (state.budgetCategories.find((c) => c.id === id) || {}).name || '—';
+  const pmIcon = { cash: '💵', credit_card: '💳', debit_card: '🏦', gcash: '📱' };
+  const pmLabel = { cash: 'Cash', credit_card: 'Credit', debit_card: 'Debit', gcash: 'GCash' };
+
+  // payment method breakdown
+  const pmTotals = {};
+  state.budgetTransactions.forEach((t) => {
+    const pm = t.paymentMethod || 'cash';
+    pmTotals[pm] = (pmTotals[pm] || 0) + t.amount;
+  });
 
   return `
     <div class="row between"><h1>Budget</h1>
@@ -631,17 +656,34 @@ async function BudgetScreen() {
       }).join('')}
     </div>` : ''}
 
+    ${Object.keys(pmTotals).length ? `
+    <div class="card">
+      <h3>By payment method</h3>
+      <div style="display:flex; gap:16px; flex-wrap:wrap;">
+        ${Object.entries(pmTotals).map(([pm, total]) => `
+          <div style="display:flex; align-items:center; gap:8px; background:var(--bg); border-radius:10px; padding:10px 16px;">
+            <span style="font-size:22px;">${pmIcon[pm] || '💳'}</span>
+            <div>
+              <div style="font-weight:700; font-size:16px;">$${total.toFixed(2)}</div>
+              <div class="muted" style="font-size:12px;">${pmLabel[pm] || pm}</div>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>` : ''}
+
     <div class="card">
       <h3>Transactions this household has logged</h3>
       <table>
-        <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Amount</th>${canManageTx ? '<th></th>' : ''}</tr></thead>
+        <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Method</th><th>Amount</th><th>Receipt</th>${canManageTx ? '<th></th>' : ''}</tr></thead>
         <tbody>
           ${state.budgetTransactions.map((t) => `
             <tr>
               <td class="muted">${t.occurredOn}</td>
               <td>${escapeHtml(catName(t.categoryId))}</td>
               <td>${escapeHtml(t.description)}</td>
-              <td style="font-weight:600;">$${t.amount.toFixed(2)}</td>
+              <td style="white-space:nowrap;">${pmIcon[t.paymentMethod] || '💵'} <span class="muted" style="font-size:12px;">${pmLabel[t.paymentMethod] || 'Cash'}</span></td>
+              <td style="font-weight:600; color:${t.amount < 0 ? 'var(--green)' : 'inherit'};">$${t.amount.toFixed(2)}</td>
+              <td>${t.receiptImage ? `<img src="${t.receiptImage}" class="receipt-thumb" data-tid="${t.id}" style="width:40px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer;" title="Click to view receipt" />` : '<span class="muted">—</span>'}</td>
               ${canManageTx ? `<td><button class="btn danger sm remove-budget-tx" data-tid="${t.id}">Delete</button></td>` : ''}
             </tr>`).join('')}
         </tbody>
@@ -663,6 +705,7 @@ async function MealsScreen() {
   meals.forEach((m) => { (byDate[m.mealDate] ||= []).push(m); });
   const dates = Object.keys(byDate).sort();
   const cookName = (id) => { const m = state.members.find((x) => x.id === id); return m ? m.name.split(' ')[0] : 'Unassigned'; };
+  const totalCals = meals.reduce((s, m) => s + (m.calories || 0), 0);
 
   return `
     <div class="row between"><h1>Meal Plan</h1>
@@ -671,20 +714,27 @@ async function MealsScreen() {
         ${canManage ? '<button class="btn sm" id="add-meal-btn">+ Add meal</button>' : ''}
       </div>
     </div>
-    <p class="subtitle">Next two weeks · ${meals.length} planned meal${meals.length === 1 ? '' : 's'}</p>
-    ${dates.length ? dates.map((date) => `
+    <p class="subtitle">Next two weeks · ${meals.length} planned meal${meals.length === 1 ? '' : 's'}${totalCals > 0 ? ` · ~${totalCals.toLocaleString()} cal total` : ''}</p>
+    ${dates.length ? dates.map((date) => {
+      const dateMeals = byDate[date];
+      const dayCals = dateMeals.reduce((s, m) => s + (m.calories || 0), 0);
+      return `
       <div class="card">
-        <h3>${new Date(date + 'T00:00:00').toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })}</h3>
-        ${byDate[date].map((m) => `
+        <div class="row between" style="margin-bottom:10px;">
+          <h3 style="margin:0;">${new Date(date + 'T00:00:00').toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })}</h3>
+          ${dayCals > 0 ? `<span class="muted" style="font-size:12px;">🔥 ${dayCals.toLocaleString()} cal</span>` : ''}
+        </div>
+        ${dateMeals.map((m) => `
           <div class="event-row" data-mid="${canManage ? m.id : ''}">
             <span class="badge member" style="text-transform:capitalize;">${m.mealType}</span>
             <div style="flex:1;">
               <div class="event-title">${escapeHtml(m.title)}</div>
-              <div class="event-meta">${m.notes ? escapeHtml(m.notes) + ' · ' : ''}👨‍🍳 ${cookName(m.assignedCook)}</div>
+              <div class="event-meta">${m.notes ? escapeHtml(m.notes) + ' · ' : ''}👨‍🍳 ${cookName(m.assignedCook)}${m.calories ? ' · 🔥 ' + m.calories + ' cal' : ''}</div>
             </div>
             ${canManage ? `<button class="btn danger sm remove-meal" data-mid="${m.id}">Delete</button>` : ''}
           </div>`).join('')}
-      </div>`).join('') : '<div class="empty-state">No meals planned yet.</div>'}
+      </div>`;
+    }).join('') : '<div class="empty-state">No meals planned yet.</div>'}
   `;
 }
 
@@ -766,11 +816,19 @@ async function MembersScreen() {
     <div class="card">
       <div class="row between"><h3>Household</h3>${isAdmin ? '<button class="btn sm" id="invite-btn">+ Invite member</button>' : ''}</div>
       <table>
-        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th>${isAdmin ? '<th></th>' : ''}</tr></thead>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead>
         <tbody>
-          ${state.members.map((m) => `
+          ${state.members.map((m) => {
+            const canEdit = isAdmin || m.id === state.user.id;
+            return `
             <tr>
-              <td><div class="row"><div class="avatar sm" style="background:${m.avatarColor}">${initials(m.name)}</div>${escapeHtml(m.name)}</div></td>
+              <td>
+                <div class="row">
+                  <div class="avatar sm" style="background:${m.avatarColor}">${initials(m.name)}</div>
+                  <span>${escapeHtml(m.name)}</span>
+                  ${canEdit ? `<button class="btn secondary sm edit-member-name" data-uid="${m.id}" data-name="${escapeHtml(m.name)}" style="padding:3px 8px; font-size:11px;">✏️</button>` : ''}
+                </div>
+              </td>
               <td class="muted">${m.email}</td>
               <td>
                 ${isAdmin && m.id !== state.user.id
@@ -780,8 +838,9 @@ async function MembersScreen() {
                   : `<span class="badge ${m.role}">${m.role}</span>`}
               </td>
               <td><span class="badge ${m.status === 'active' ? 'accepted' : m.status === 'invited' ? 'pending' : 'declined'}">${m.status}</span></td>
-              ${isAdmin ? `<td>${m.id !== state.user.id ? `<button class="btn danger sm remove-member" data-uid="${m.id}">Remove</button>` : ''}</td>` : ''}
-            </tr>`).join('')}
+              <td>${isAdmin && m.id !== state.user.id ? `<button class="btn danger sm remove-member" data-uid="${m.id}">Remove</button>` : ''}</td>
+            </tr>`;
+          }).join('')}
         </tbody>
       </table>
     </div>
@@ -1028,6 +1087,24 @@ function openBudgetTransactionModal() {
       <div class="field"><label>Amount ($) — positive = expense, negative = refund/income</label><input id="bt-amount" type="number" step="0.01" /></div>
       <div class="field"><label>Description</label><input id="bt-desc" /></div>
       <div class="field"><label>Date</label><input id="bt-date" type="date" value="${new Date().toISOString().slice(0,10)}" /></div>
+      <div class="field">
+        <label>Payment method</label>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="btn sm pm-btn" data-pm="cash" style="background:var(--primary);color:white;">💵 Cash</button>
+          <button class="btn sm pm-btn secondary" data-pm="credit_card">💳 Credit</button>
+          <button class="btn sm pm-btn secondary" data-pm="debit_card">🏦 Debit</button>
+          <button class="btn sm pm-btn secondary" data-pm="gcash">📱 GCash</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>Receipt (optional)</label>
+        <input type="file" id="bt-receipt-input" accept="image/*" capture="environment" style="display:none;" />
+        <button class="btn secondary sm" id="bt-receipt-btn" style="width:100%;">📷 Scan / attach receipt</button>
+        <div id="bt-receipt-preview" style="display:none; margin-top:8px; position:relative;">
+          <img id="bt-receipt-img" style="width:100%; max-height:160px; object-fit:contain; border-radius:8px; border:1px solid var(--border);" />
+          <button class="btn danger sm" id="bt-receipt-remove" style="position:absolute; top:4px; right:4px;">✕</button>
+        </div>
+      </div>
       <div class="row" style="justify-content:flex-end; gap:8px;">
         <button class="btn secondary" id="bt-cancel">Cancel</button>
         <button class="btn" id="bt-save">Save</button>
@@ -1035,16 +1112,57 @@ function openBudgetTransactionModal() {
     </div>`;
   document.body.appendChild(backdrop);
   if (state.budgetCategories.length === 0) { toast('Create a budget category first', true); backdrop.remove(); return; }
+
+  let selectedPm = 'cash';
+  backdrop.querySelectorAll('.pm-btn').forEach((b) => {
+    b.onclick = () => {
+      selectedPm = b.dataset.pm;
+      backdrop.querySelectorAll('.pm-btn').forEach((x) => { x.style.background = ''; x.style.color = ''; x.className = 'btn sm pm-btn secondary'; });
+      b.className = 'btn sm pm-btn'; b.style.background = 'var(--primary)'; b.style.color = 'white';
+    };
+  });
+
+  let receiptImage = null;
+  backdrop.querySelector('#bt-receipt-btn').onclick = () => backdrop.querySelector('#bt-receipt-input').click();
+  backdrop.querySelector('#bt-receipt-input').onchange = (ev) => {
+    const file = ev.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 600;
+        let w = img.width, h = img.height;
+        if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        receiptImage = canvas.toDataURL('image/jpeg', 0.72);
+        backdrop.querySelector('#bt-receipt-img').src = receiptImage;
+        backdrop.querySelector('#bt-receipt-preview').style.display = 'block';
+        backdrop.querySelector('#bt-receipt-btn').style.display = 'none';
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+  backdrop.querySelector('#bt-receipt-remove').onclick = () => {
+    receiptImage = null;
+    backdrop.querySelector('#bt-receipt-preview').style.display = 'none';
+    backdrop.querySelector('#bt-receipt-btn').style.display = '';
+    backdrop.querySelector('#bt-receipt-input').value = '';
+  };
+
   backdrop.querySelector('#bt-cancel').onclick = () => backdrop.remove();
   backdrop.querySelector('#bt-save').onclick = async () => {
-    const categoryId = document.querySelector('#bt-cat').value;
-    const amount = Number(document.querySelector('#bt-amount').value);
-    const description = document.querySelector('#bt-desc').value;
-    const occurredOn = document.querySelector('#bt-date').value;
-    if (!amount) { markInvalid(document.querySelector('#bt-amount')); return toast('Amount is required', true); }
-    if (!occurredOn) { markInvalid(document.querySelector('#bt-date')); return toast('Date is required', true); }
+    const categoryId = backdrop.querySelector('#bt-cat').value;
+    const amount = Number(backdrop.querySelector('#bt-amount').value);
+    const description = backdrop.querySelector('#bt-desc').value;
+    const occurredOn = backdrop.querySelector('#bt-date').value;
+    if (!amount) { markInvalid(backdrop.querySelector('#bt-amount')); return toast('Amount is required', true); }
+    if (!occurredOn) { markInvalid(backdrop.querySelector('#bt-date')); return toast('Date is required', true); }
     try {
-      await api(`/api/families/${state.user.familyId}/budget/transactions`, { method: 'POST', body: JSON.stringify({ categoryId, amount, description, occurredOn }) });
+      await api(`/api/families/${state.user.familyId}/budget/transactions`, { method: 'POST', body: JSON.stringify({ categoryId, amount, description, occurredOn, paymentMethod: selectedPm, receiptImage }) });
       toast('Transaction logged'); backdrop.remove(); render();
     } catch {}
   };
@@ -1063,6 +1181,7 @@ function openMealModal() {
       </div>
       <div class="field"><label>Title</label><input id="ml-title" placeholder="e.g. Taco night" /></div>
       <div class="field"><label>Notes</label><input id="ml-notes" /></div>
+      <div class="field"><label>Calories (optional)</label><input id="ml-calories" type="number" min="0" placeholder="e.g. 450" /></div>
       <div class="field"><label>Assigned cook</label>
         <select id="ml-cook"><option value="">Unassigned</option>${state.members.map((m) => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('')}</select>
       </div>
@@ -1074,14 +1193,15 @@ function openMealModal() {
   document.body.appendChild(backdrop);
   backdrop.querySelector('#ml-cancel').onclick = () => backdrop.remove();
   backdrop.querySelector('#ml-save').onclick = async () => {
-    const mealDate = document.querySelector('#ml-date').value;
-    const mealType = document.querySelector('#ml-type').value;
-    const title = document.querySelector('#ml-title').value;
-    const notes = document.querySelector('#ml-notes').value;
-    const assignedCook = document.querySelector('#ml-cook').value || null;
-    if (!title) { markInvalid(document.querySelector('#ml-title')); return toast('Title is required', true); }
+    const mealDate = backdrop.querySelector('#ml-date').value;
+    const mealType = backdrop.querySelector('#ml-type').value;
+    const title = backdrop.querySelector('#ml-title').value;
+    const notes = backdrop.querySelector('#ml-notes').value;
+    const calories = Number(backdrop.querySelector('#ml-calories').value) || 0;
+    const assignedCook = backdrop.querySelector('#ml-cook').value || null;
+    if (!title) { markInvalid(backdrop.querySelector('#ml-title')); return toast('Title is required', true); }
     try {
-      await api(`/api/families/${state.user.familyId}/meals`, { method: 'POST', body: JSON.stringify({ mealDate, mealType, title, notes, assignedCook }) });
+      await api(`/api/families/${state.user.familyId}/meals`, { method: 'POST', body: JSON.stringify({ mealDate, mealType, title, notes, calories, assignedCook }) });
       toast('Meal added'); backdrop.remove(); render();
     } catch {}
   };
@@ -1173,6 +1293,9 @@ function wireScreenEvents(route) {
         toast('Member removed'); render();
       };
     });
+    document.querySelectorAll('.edit-member-name').forEach((b) => {
+      b.onclick = () => openEditNameModal(b.dataset.uid, b.dataset.name);
+    });
     const inviteBtn = document.querySelector('#invite-btn');
     if (inviteBtn) inviteBtn.onclick = () => openInviteModal();
     const saveSettingsBtn = document.querySelector('#save-settings-btn');
@@ -1217,6 +1340,20 @@ function wireScreenEvents(route) {
         if (!confirm('Delete this transaction?')) return;
         await api(`/api/budget/transactions/${b.dataset.tid}`, { method: 'DELETE' });
         toast('Transaction deleted'); render();
+      };
+    });
+    document.querySelectorAll('.receipt-thumb').forEach((img) => {
+      img.onclick = () => {
+        const lb = document.createElement('div');
+        lb.className = 'modal-backdrop';
+        lb.style.zIndex = '200';
+        lb.innerHTML = `<div style="background:var(--card);border-radius:var(--radius);padding:16px;max-width:90vw;max-height:90vh;overflow:auto;">
+          <img src="${img.src}" style="max-width:100%;max-height:80vh;object-fit:contain;border-radius:8px;" />
+          <div style="text-align:right;margin-top:10px;"><button class="btn secondary sm" id="lb-close">Close</button></div>
+        </div>`;
+        document.body.appendChild(lb);
+        lb.querySelector('#lb-close').onclick = () => lb.remove();
+        lb.onclick = (e) => { if (e.target === lb) lb.remove(); };
       };
     });
 
@@ -1363,6 +1500,36 @@ function openShoppingListModal() {
       ta.remove(); toast('Copied to clipboard');
     });
   };
+}
+
+function openEditNameModal(userId, currentName) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal" style="width:360px;">
+      <h3 style="margin-top:0;">Edit name</h3>
+      <div class="field"><label>Name</label><input id="en-name" value="${escapeHtml(currentName)}" /></div>
+      <div class="row" style="justify-content:flex-end; gap:8px;">
+        <button class="btn secondary" id="en-cancel">Cancel</button>
+        <button class="btn" id="en-save">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const nameInput = backdrop.querySelector('#en-name');
+  nameInput.focus(); nameInput.select();
+  backdrop.querySelector('#en-cancel').onclick = () => backdrop.remove();
+  backdrop.querySelector('#en-save').onclick = async () => {
+    const name = nameInput.value.trim();
+    if (!name) { markInvalid(nameInput); return toast('Name cannot be empty', true); }
+    if (name === currentName) { backdrop.remove(); return; }
+    try {
+      await api(`/api/families/${state.user.familyId}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ name }) });
+      // update local state immediately so sidebar/avatar reflect change
+      if (state.user.id === userId) state.user.name = name;
+      toast('Name updated'); backdrop.remove(); render();
+    } catch {}
+  };
+  nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') backdrop.querySelector('#en-save').click(); });
 }
 
 function openInviteModal() {

@@ -9,15 +9,15 @@
     "ios": "expo start --ios"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "1.23.1",
     "expo": "~51.0.0",
-    "expo-status-bar": "~1.12.1",
-    "expo-notifications": "~0.28.0",
-    "expo-device": "~6.0.2",
     "expo-constants": "~16.0.2",
+    "expo-device": "~6.0.2",
+    "expo-image-picker": "~15.1.0",
+    "expo-notifications": "~0.28.0",
+    "expo-status-bar": "~1.12.1",
     "react": "18.2.0",
-    "react-native": "0.74.5",
-    "@react-native-async-storage/async-storage": "1.23.1"
+    "react-native": "0.74.5"
   },
-  "devDependencies": {},
   "comment": "NOTE: this sandbox has no npm registry access, so these packages could not be installed/tested here. Run `npm install` on your own machine (which has normal internet access) before `npx expo start`. See docs/06_run_locally.md."
 }

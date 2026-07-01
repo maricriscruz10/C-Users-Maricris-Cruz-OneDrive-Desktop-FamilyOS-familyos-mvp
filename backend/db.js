@@ -128,6 +128,8 @@ CREATE TABLE IF NOT EXISTS budget_transactions (
   amount REAL NOT NULL, -- positive = expense, negative = income/refund
   description TEXT DEFAULT '',
   occurred_on TEXT NOT NULL, -- date string YYYY-MM-DD
+  payment_method TEXT NOT NULL DEFAULT 'cash', -- cash|credit_card|debit_card|gcash
+  receipt_image TEXT, -- base64 JPEG thumbnail, nullable
   created_by TEXT NOT NULL REFERENCES users(id),
   created_at TEXT NOT NULL
 );
@@ -140,6 +142,7 @@ CREATE TABLE IF NOT EXISTS meal_plan_entries (
   meal_type TEXT NOT NULL CHECK(meal_type IN ('breakfast','lunch','dinner','snack')),
   title TEXT NOT NULL,
   notes TEXT DEFAULT '',
+  calories INTEGER DEFAULT 0,
   assigned_cook TEXT REFERENCES users(id),
   created_by TEXT NOT NULL REFERENCES users(id),
   created_at TEXT NOT NULL,
@@ -196,6 +199,15 @@ if (!columnExists('events', 'category')) {
 }
 if (!columnExists('events', 'provider')) {
   db.exec(`ALTER TABLE events ADD COLUMN provider TEXT DEFAULT ''`);
+}
+if (!columnExists('budget_transactions', 'payment_method')) {
+  db.exec(`ALTER TABLE budget_transactions ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash'`);
+}
+if (!columnExists('budget_transactions', 'receipt_image')) {
+  db.exec(`ALTER TABLE budget_transactions ADD COLUMN receipt_image TEXT`);
+}
+if (!columnExists('meal_plan_entries', 'calories')) {
+  db.exec(`ALTER TABLE meal_plan_entries ADD COLUMN calories INTEGER DEFAULT 0`);
 }
 db.exec(`CREATE INDEX IF NOT EXISTS idx_events_family_category ON events(family_id, category)`);
 

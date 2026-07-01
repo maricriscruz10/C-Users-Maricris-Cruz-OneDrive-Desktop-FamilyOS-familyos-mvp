@@ -58,10 +58,10 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     (async () => {
-      const famRes = await Api.family(user.familyId).catch(() => ({ family: await Cache.getFamily() }));
+      const famRes = await Api.family(user.familyId).catch(async () => ({ family: await Cache.getFamily() }));
       setFamily(famRes.family);
       await Cache.setFamily(famRes.family);
-      const memRes = await Api.members(user.familyId).catch(() => ({ members: await Cache.getMembers() }));
+      const memRes = await Api.members(user.familyId).catch(async () => ({ members: await Cache.getMembers() }));
       setMembers(memRes.members);
       await Cache.setMembers(memRes.members);
       await registerForPushNotifications().catch(() => {});
@@ -74,6 +74,16 @@ export default function App() {
 
   const handleLoggedIn = useCallback((u) => setUser(u), []);
   const handleLogout = useCallback(() => { setUser(null); setFamily(null); setMembers([]); setTab('agenda'); }, []);
+  const refreshMembers = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await Api.members(user.familyId);
+      setMembers(res.members);
+      await Cache.setMembers(res.members);
+      const me = res.members.find((m) => m.id === user.id);
+      if (me) setUser((u) => ({ ...u, name: me.name }));
+    } catch {}
+  }, [user]);
 
   if (!bootstrapped) return <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }} />;
   if (!user) return <LoginScreen onLoggedIn={handleLoggedIn} />;
@@ -98,7 +108,7 @@ export default function App() {
           onOpenEvent={(e) => setModal({ open: true, event: e })}
         />
       )}
-      {activeTab === 'family' && <MembersScreen family={family} members={members} />}
+      {activeTab === 'family' && <MembersScreen family={family} members={members} user={user} familyId={user.familyId} onMembersChanged={refreshMembers} />}
       {activeTab === 'budget' && !isChild && <BudgetScreen user={user} familyId={user.familyId} />}
       {activeTab === 'meals' && <MealsScreen user={user} familyId={user.familyId} members={members} />}
       {activeTab === 'chores' && <ChoresScreen user={user} familyId={user.familyId} members={members} />}

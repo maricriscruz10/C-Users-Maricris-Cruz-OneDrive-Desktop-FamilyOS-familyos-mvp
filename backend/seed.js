@@ -71,11 +71,11 @@ function insertBudgetTx(familyId, categoryId, amount, description, occurredOn, c
   return id;
 }
 
-function insertMeal(familyId, mealDate, mealType, title, notes, assignedCook, createdBy) {
+function insertMeal(familyId, mealDate, mealType, title, notes, assignedCook, createdBy, calories = 0) {
   const id = uuid();
   const ts = now();
-  db.prepare(`INSERT INTO meal_plan_entries (id,family_id,meal_date,meal_type,title,notes,assigned_cook,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, familyId, mealDate, mealType, title, notes || '', assignedCook || null, createdBy, ts, ts);
+  db.prepare(`INSERT INTO meal_plan_entries (id,family_id,meal_date,meal_type,title,notes,assigned_cook,created_by,calories,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, familyId, mealDate, mealType, title, notes || '', assignedCook || null, createdBy, calories, ts, ts);
   return id;
 }
 
@@ -156,29 +156,41 @@ function run() {
   audit(garcias, 'event', e2, 'update', marc, { location: 'Riverside Field' }, { location: 'Riverside Field (Field B)' });
 
   // ---- Budgeting (Child has zero access — see auth.js) ----
-  const catGroceries = insertBudgetCategory(garcias, 'Groceries', 600, '#10b981');
-  const catActivities = insertBudgetCategory(garcias, 'Kids Activities', 200, '#6366f1');
-  const catMedical = insertBudgetCategory(garcias, 'Medical', 150, '#ef4444');
-  const catHousehold = insertBudgetCategory(garcias, 'Household', 300, '#f59e0b');
+  const catGroceries     = insertBudgetCategory(garcias, 'Groceries',       600, '#10b981');
+  const catActivities    = insertBudgetCategory(garcias, 'Kids Activities',  200, '#6366f1');
+  const catMedical       = insertBudgetCategory(garcias, 'Medical',          150, '#ef4444');
+  const catHousehold     = insertBudgetCategory(garcias, 'Household',        300, '#f59e0b');
+  const catTransport     = insertBudgetCategory(garcias, 'Transportation',   400, '#f97316');
+  const catDining        = insertBudgetCategory(garcias, 'Dining Out',       250, '#ec4899');
+  const catUtilities     = insertBudgetCategory(garcias, 'Utilities',        200, '#3b82f6');
   const thisMonth = today.toISOString().slice(0, 7);
-  insertBudgetTx(garcias, catGroceries, 84.32, 'Weekly grocery run — HEB', `${thisMonth}-03`, dana);
-  insertBudgetTx(garcias, catGroceries, 91.10, 'Weekly grocery run — HEB', `${thisMonth}-10`, dana);
-  insertBudgetTx(garcias, catGroceries, 76.55, 'Weekly grocery run — Costco', `${thisMonth}-17`, marc);
-  insertBudgetTx(garcias, catActivities, 45.00, 'Piano lesson — monthly fee', `${thisMonth}-01`, dana);
-  insertBudgetTx(garcias, catActivities, 120.00, 'Soccer registration', `${thisMonth}-05`, marc);
-  insertBudgetTx(garcias, catActivities, 60.00, 'Soccer registration', `${thisMonth}-05`, marc); // pushes Activities over its $200 limit — tests overBudget flag
-  insertBudgetTx(garcias, catMedical, 35.00, "Sam's checkup copay", `${thisMonth}-${(today.getDate() - 2 < 10 ? '0' : '') + Math.max(today.getDate() - 2, 1)}`, dana);
-  insertBudgetTx(garcias, catHousehold, 22.99, 'Cleaning supplies', `${thisMonth}-08`, grandma);
+  insertBudgetTx(garcias, catGroceries,  84.32, 'Weekly grocery run — HEB',      `${thisMonth}-03`, dana);
+  insertBudgetTx(garcias, catGroceries,  91.10, 'Weekly grocery run — HEB',      `${thisMonth}-10`, dana);
+  insertBudgetTx(garcias, catGroceries,  76.55, 'Weekly grocery run — Costco',   `${thisMonth}-17`, marc);
+  insertBudgetTx(garcias, catActivities, 45.00, 'Piano lesson — monthly fee',    `${thisMonth}-01`, dana);
+  insertBudgetTx(garcias, catActivities,120.00, 'Soccer registration',           `${thisMonth}-05`, marc);
+  insertBudgetTx(garcias, catActivities, 60.00, 'Soccer registration',           `${thisMonth}-05`, marc); // pushes Activities over its $200 limit — tests overBudget flag
+  insertBudgetTx(garcias, catMedical,    35.00, "Sam's checkup copay",           `${thisMonth}-${(today.getDate() - 2 < 10 ? '0' : '') + Math.max(today.getDate() - 2, 1)}`, dana);
+  insertBudgetTx(garcias, catHousehold,  22.99, 'Cleaning supplies',             `${thisMonth}-08`, grandma);
+  insertBudgetTx(garcias, catTransport,  55.00, 'Gas fill-up',                   `${thisMonth}-05`, marc);
+  insertBudgetTx(garcias, catTransport,  38.50, 'Grab — school run',             `${thisMonth}-12`, dana);
+  insertBudgetTx(garcias, catTransport,  28.00, 'Grab — grocery trip',           `${thisMonth}-18`, dana);
+  insertBudgetTx(garcias, catDining,     42.80, 'Pizza Hut — family night',      `${thisMonth}-09`, marc);
+  insertBudgetTx(garcias, catDining,     18.50, 'GrabFood — lunch delivery',     `${thisMonth}-14`, dana);
+  insertBudgetTx(garcias, catDining,     65.00, 'Restaurant — grandma birthday', `${thisMonth}-20`, dana);
+  insertBudgetTx(garcias, catUtilities, 120.00, 'Electric bill',                 `${thisMonth}-02`, dana);
+  insertBudgetTx(garcias, catUtilities,  45.00, 'Internet bill',                 `${thisMonth}-02`, dana);
 
   // ---- Meal planning (visible to everyone, only Admin/Member can create/edit) ----
-  insertMeal(garcias, ds(0), 'breakfast', 'Oatmeal & berries', '', marc, dana);
-  insertMeal(garcias, ds(0), 'dinner', 'Spaghetti & meatballs', 'Lily helps set the table', dana, dana);
-  insertMeal(garcias, ds(1), 'breakfast', 'Scrambled eggs & toast', '', marc, dana);
-  insertMeal(garcias, ds(1), 'lunch', 'Leftover spaghetti', '', null, dana);
-  insertMeal(garcias, ds(1), 'dinner', 'Taco night', 'Get extra tortillas', marc, dana);
-  insertMeal(garcias, ds(2), 'dinner', 'Family Dinner — roast chicken', 'Coordinates with the Family Dinner event', grandma, dana);
-  insertMeal(garcias, ds(3), 'dinner', 'Stir-fry veggies & rice', '', dana, marc);
-  insertMeal(garcias, ds(-1), 'dinner', 'Pizza night', '', marc, dana);
+  insertMeal(garcias, ds(0),  'breakfast', 'Oatmeal & berries',              '',                                           marc,    dana,  320);
+  insertMeal(garcias, ds(0),  'dinner',    'Spaghetti & meatballs',          'Lily helps set the table',                   dana,    dana,  680);
+  insertMeal(garcias, ds(1),  'breakfast', 'Scrambled eggs & toast',         '',                                           marc,    dana,  380);
+  insertMeal(garcias, ds(1),  'lunch',     'Leftover spaghetti',             '',                                           null,    dana,  520);
+  insertMeal(garcias, ds(1),  'dinner',    'Taco night',                     'Get extra tortillas',                        marc,    dana,  750);
+  insertMeal(garcias, ds(2),  'dinner',    'Family Dinner — roast chicken',  'Coordinates with the Family Dinner event',   grandma, dana,  610);
+  insertMeal(garcias, ds(3),  'breakfast', 'Avocado toast',                  '',                                           marc,    dana,  290);
+  insertMeal(garcias, ds(3),  'dinner',    'Stir-fry veggies & rice',        '',                                           dana,    marc,  480);
+  insertMeal(garcias, ds(-1), 'dinner',    'Pizza night',                    '',                                           marc,    dana,  820);
 
   // ---- Chores (assignable, recurring, points-based; visible to all roles incl. children) ----
   const c1 = insertChore(garcias, 'Set the table', 'Before every dinner', lily, 'daily', null, 5, dana, 'pending');
@@ -209,9 +221,13 @@ function run() {
   assign(o2, tomi, 'accepted'); assign(o2, ada, 'accepted');
 
   // minimal budget/meal/chore data for the low-engagement family — tests sparse-data UI states
-  const okGroceries = insertBudgetCategory(okafors, 'Groceries', 500, '#10b981');
-  insertBudgetTx(okafors, okGroceries, 62.18, 'Grocery run', `${thisMonth}-06`, tomi);
-  insertMeal(okafors, ds(0), 'dinner', 'Jollof rice & chicken', '', tomi, tomi);
+  const okGroceries  = insertBudgetCategory(okafors, 'Groceries',      500, '#10b981');
+  const okTransport  = insertBudgetCategory(okafors, 'Transportation', 300, '#f97316');
+  const okDining     = insertBudgetCategory(okafors, 'Dining Out',     150, '#ec4899');
+  const okUtilities  = insertBudgetCategory(okafors, 'Utilities',      180, '#3b82f6');
+  insertBudgetTx(okafors, okGroceries, 62.18, 'Grocery run',   `${thisMonth}-06`, tomi);
+  insertBudgetTx(okafors, okUtilities, 98.00, 'Electric bill', `${thisMonth}-03`, tomi);
+  insertMeal(okafors, ds(0), 'dinner', 'Jollof rice & chicken', '', tomi, tomi, 720);
   insertChore(okafors, 'Water the plants', '', ada, 'weekly', ds(2), 5, tomi, 'pending');
 
   insertUser; // no-op reference to silence unused lint in some editors
